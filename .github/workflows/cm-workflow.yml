@@ -305,10 +305,10 @@ jobs:
           repo_name = os.environ.get("GITHUB_REPOSITORY", "")
 
           for idx, finding in enumerate(findings, 1):
-              finding_id = finding.get("FindingID")
-              title = finding.get("Title", "Security Vulnerability")
-              severity = finding.get("Severity", "UNKNOWN")
-              status = finding.get("Status", "OPEN")
+              finding_id = finding.get("finding_id") or finding.get("FindingID") or finding.get("id")
+              title = finding.get("title") or finding.get("Title", "Security Vulnerability")
+              severity = (finding.get("severity") or finding.get("Severity", "UNKNOWN")).upper()
+              status = (finding.get("status") or finding.get("Status", "OPEN")).upper()
 
               if not finding_id or status == "FIXED":
                   continue
@@ -409,8 +409,9 @@ jobs:
               except subprocess.CalledProcessError as e:
                   print(f"[ERROR] Git command failed for finding {finding_id}: {e}", file=sys.stderr)
               finally:
-                  # 다음 검증을 위해 원본 베이스 커밋으로 복귀
-                  subprocess.run(["git", "checkout", base_commit])
+                  # 다음 검증을 위해 원본 베이스 커밋으로 복귀 및 작업 트리 정리
+                  subprocess.run(["git", "checkout", "-f", base_commit])
+                  subprocess.run(["git", "clean", "-fd"])
 
           print("\n=== All findings processed successfully ===")
           EOF
