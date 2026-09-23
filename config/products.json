@@ -1,0 +1,94 @@
+{
+  "default_initial_snapshot_date": "2026-06-01",
+  "admin_emails": [
+    "dragon@jayseo.altostrat.com"
+  ],
+  "schedule": {
+    "auto_update_enabled": true,
+    "auto_update_time": "05:00",
+    "recent_highlight_days": 7
+  },
+  "products": [
+    {
+      "slug": "security-command-center",
+      "name": "Security Command Center",
+      "category": "Security Posture & Threat Detection",
+      "release_notes_url": "https://docs.cloud.google.com/security-command-center/docs/release-notes",
+      "initial_snapshot_date": "2026-06-01",
+      "enabled": true,
+      "description": "Google Cloud의 중앙 집중식 취약점, 위협 탐지 및 보안 태세 관리 플랫폼"
+    },
+    {
+      "slug": "Model-Armor",
+      "name": "Model Armor",
+      "category": "Network & Application Security",
+      "release_notes_url": "https://docs.cloud.google.com/model-armor/release-notes",
+      "initial_snapshot_date": "2026-06-01",
+      "enabled": true,
+      "description": "사용자 프롬프트 및 LLM 응답 보안 점검"
+    },
+    {
+      "slug": "cloud-kms",
+      "name": "Cloud Key Management Service",
+      "category": "Data Security & Encryption",
+      "release_notes_url": "https://docs.cloud.google.com/kms/docs/release-notes",
+      "initial_snapshot_date": "2026-06-01",
+      "enabled": true,
+      "description": "클라우드 암호화 키 생성, 사용, 교체 및 폐기 관리 서비스"
+    },
+    {
+      "slug": "Google-secops",
+      "name": "Google Security Operations (Chronicle)",
+      "category": "SecOps & SIEM/SOAR",
+      "release_notes_url": "https://docs.cloud.google.com/chronicle/docs/release-notes",
+      "initial_snapshot_date": "2026-06-01",
+      "enabled": true,
+      "description": "클라우드 네이티브 SIEM/SOAR 및 위협 인텔리전스 분석 플랫폼"
+    },
+    {
+      "slug": "secret-manager",
+      "name": "Secret Manager",
+      "category": "Data Security & Secret Management",
+      "release_notes_url": "https://docs.cloud.google.com/secret-manager/docs/release-notes",
+      "initial_snapshot_date": "2026-06-01",
+      "enabled": true,
+      "description": "API 키, 비밀번호, 인증서 등 민감한 비밀 데이터를 안전하게 저장 및 관리하는 서비스"
+    },
+    {
+      "slug": "sensitive-data-protection",
+      "name": "Sensitive Data Protection",
+      "category": "Data Security & Privacy",
+      "release_notes_url": "https://docs.cloud.google.com/sensitive-data-protection/docs/release-notes",
+      "initial_snapshot_date": "2026-06-01",
+      "enabled": true,
+      "description": "민감한 데이터(PII 등)를 검색, 분류 및 비식별화하여 보호하는 데이터 보안 및 프라이버시 서비스 (구 Cloud DLP)"
+    },
+    {
+      "slug": "identity-aware-proxy",
+      "name": "Identity-Aware Proxy (IAP)",
+      "category": "Identity & Access Management",
+      "release_notes_url": "https://docs.cloud.google.com/iap/docs/release-notes",
+      "initial_snapshot_date": "2026-06-01",
+      "enabled": true,
+      "description": "제로 트러스트 모델 기반으로 HTTPS 애플리케이션 및 VM에 대한 컨텍스트 인식 액세스 제어 서비스"
+    },
+    {
+      "slug": "certificate-manager",
+      "name": "Certificate Manager",
+      "category": "Data Security & Encryption",
+      "release_notes_url": "https://docs.cloud.google.com/certificate-manager/docs/release-notes",
+      "initial_snapshot_date": "2026-06-01",
+      "enabled": true,
+      "description": "Google Cloud 로드 밸런서 및 워크로드용 TLS/SSL 인증서를 발급, 관리 및 자동 갱신하는 서비스"
+    },
+    {
+      "slug": "binary-authorization",
+      "name": "Binary Authorization",
+      "category": "Application & Supply Chain Security",
+      "release_notes_url": "https://docs.cloud.google.com/binary-authorization/docs/release-notes",
+      "initial_snapshot_date": "2026-06-01",
+      "enabled": true,
+      "description": "신뢰할 수 있는 컨테이너 이미지만 GKE 및 Cloud Run 등에 배포되도록 보장하는 소프트웨어 공급망 보안 서비스"
+    }
+  ]
+}

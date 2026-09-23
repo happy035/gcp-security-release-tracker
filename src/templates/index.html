@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title id="pageTitle">GCP Security Release Notes Tracker</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif;
+      background-color: #f8fafc;
+      color: #0f172a;
+    }
+    .release-html p {
+      margin-bottom: 0.5rem;
+      line-height: 1.65;
+    }
+    .release-html p:last-child {
+      margin-bottom: 0;
+    }
+    .release-html ul {
+      list-style-type: disc;
+      padding-left: 1.25rem;
+      margin-top: 0.35rem;
+      margin-bottom: 0.5rem;
+    }
+    .release-html li {
+      margin-bottom: 0.25rem;
+    }
+    .release-html code {
+      background: #f1f5f9;
+      padding: 0.12rem 0.35rem;
+      border-radius: 0.25rem;
+      font-size: 0.85em;
+      color: #0f172a;
+    }
+    .release-html a {
+      color: #2563eb;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    .release-recent p,
+    .release-recent li {
+      color: #1e293b;
+      font-weight: 500;
+    }
+    .release-deprecated p,
+    .release-deprecated li {
+      color: #0f172a;
+      font-weight: 500;
+    }
+    .release-normal p,
+    .release-normal li {
+      color: #334155;
+    }
+    @keyframes pulseSubtle {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.78; }
+    }
+    .recent-badge-pulse {
+      animation: pulseSubtle 2.2s infinite ease-in-out;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+  <!-- Top Navigation Header (General User View) -->
+  <header class="bg-slate-900 text-white border-b border-slate-800 sticky top-0 z-30 shadow-sm">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-2">
+      <div class="flex items-center space-x-3">
+        <div class="w-9 h-9 rounded-lg bg-blue-600 flex items-center justify-center font-bold text-lg shadow-inner">
+          G
+        </div>
+        <div>
+          <h1 class="text-base sm:text-lg font-bold tracking-tight flex items-center gap-2">
+            <span id="i18nAppTitle">GCP Security Release Notes Tracker</span>
+            <span class="text-xs font-medium bg-blue-500/20 text-blue-300 border border-blue-400/30 px-2 py-0.5 rounded-full">
+              Release Notes Hub
+            </span>
+          </h1>
+          <p id="i18nAppSubtitle" class="text-xs text-slate-400 hidden sm:block">
+            Official release notes & recent 7-day updates dashboard for Google Cloud Security products
+          </p>
+        </div>
+      </div>
+
+      <div class="flex items-center space-x-2 sm:space-x-2.5">
+        <!-- Read-only Schedule Status Badge -->
+        <div class="hidden md:flex px-3 py-1.5 text-xs font-medium bg-slate-800/90 text-slate-300 border border-slate-700 rounded-lg items-center gap-1.5">
+          <span class="inline-block w-2 h-2 rounded-full bg-emerald-400"></span>
+          <span id="headerScheduleText">Auto-update daily at 05:00</span>
+        </div>
+
+        <!-- Language Switcher (EN / KO) -->
+        <div class="inline-flex items-center bg-slate-800 border border-slate-700 rounded-lg p-0.5 text-xs font-bold" role="group" aria-label="Language Switcher">
+          <button id="langBtnEN" type="button" onclick="setLanguage('en')"
+            class="px-2.5 py-1 rounded-md transition bg-blue-600 text-white">
+            EN
+          </button>
+          <button id="langBtnKO" type="button" onclick="setLanguage('ko')"
+            class="px-2.5 py-1 rounded-md transition text-slate-400 hover:text-white">
+            KO
+          </button>
+        </div>
+
+        <!-- Admin Console Link -->
+        <a id="adminConsoleLink" href="/admin"
+          class="inline-flex px-3.5 py-1.5 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/40 rounded-lg shadow transition items-center gap-1.5"
+          title="Admin Console (dragon@jayseo.altostrat.com only)">
+          <span id="adminConsoleLinkText">🔐 Admin Console (/admin)</span>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Workspace Container -->
+  <main class="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+    <!-- Left Sidebar: Product Filter List -->
+    <aside class="lg:col-span-4 xl:col-span-3 space-y-5">
+      <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+        <div class="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+          <h2 id="i18nProductListHeader" class="text-xs font-bold uppercase tracking-wider text-slate-600">GCP Security Products</h2>
+          <span id="productCountBadge" class="text-xs font-semibold text-slate-500">0</span>
+        </div>
+        <div id="productListContainer" class="divide-y divide-slate-100">
+          <!-- Dynamically populated -->
+        </div>
+      </div>
+    </aside>
+
+    <!-- Right Content Area: Filters, Stats & Release Notes Feed -->
+    <section class="lg:col-span-8 xl:col-span-9 space-y-5">
+
+      <!-- Summary Stat Cards -->
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
+        <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+          <div class="flex items-center justify-between">
+            <div id="i18nCardTotalTitle" class="text-xs font-medium text-slate-500">Total Updates</div>
+            <span id="statRecentBadge" class="text-[11px] font-bold text-rose-600 bg-rose-50 border border-rose-200 px-1.5 py-0.5 rounded">
+              🔥 0 in 7d
+            </span>
+          </div>
+          <div id="statTotalCount" class="text-2xl font-bold text-slate-900 mt-1">0</div>
+          <div id="i18nCardTotalSub" class="text-[11px] text-slate-400 mt-1">Collected items for selection</div>
+        </div>
+
+        <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+          <div id="i18nCardFeatureTitle" class="text-xs font-medium text-emerald-600">New Features (Feature)</div>
+          <div id="statFeatureCount" class="text-2xl font-bold text-emerald-700 mt-1">0</div>
+          <div id="i18nCardFeatureSub" class="text-[11px] text-slate-400 mt-1">New security capabilities & rules</div>
+        </div>
+
+        <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+          <div id="i18nCardOtherTitle" class="text-xs font-medium text-amber-600">Changed / Fixed / Deprecated</div>
+          <div id="statOtherCount" class="text-2xl font-bold text-amber-700 mt-1">0</div>
+          <div id="statOtherBreakdown" class="text-[11px] text-slate-500 mt-1 font-medium">
+            Changed 0 · Deprecated 0 · Fixed 0 · Notice 0
+          </div>
+        </div>
+
+        <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+          <div id="i18nCardLastUpdateTitle" class="text-xs font-medium text-blue-600">Last Updated</div>
+          <div id="statCurrentSnapshot" class="text-lg font-bold text-blue-700 mt-1.5">-</div>
+          <div id="statTodayInfo" class="text-[11px] text-slate-400 mt-1">Based on latest scan date</div>
+        </div>
+      </div>
+
+      <!-- Filter & Search Bar -->
+      <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col xl:flex-row items-stretch xl:items-center justify-between gap-3">
+        <div class="flex flex-wrap items-center gap-1.5" id="typeFilterButtons">
+          <button onclick="setReleaseType('all')" data-type="all"
+            class="type-btn px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-900 text-white">
+            <span id="i18nBtnAll">All</span> <span id="btnCountAll" class="ml-1 opacity-80">(0)</span>
+          </button>
+          <button onclick="setReleaseType('RECENT_WEEK')" data-type="RECENT_WEEK"
+            class="type-btn px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100">
+            🔥 <span id="i18nBtnRecentWeek">Last 7 Days</span> <span id="btnCountRecent" class="ml-0.5 font-bold">(0)</span>
+          </button>
+          <button onclick="setReleaseType('Feature')" data-type="Feature"
+            class="type-btn px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200">
+            Feature <span id="btnCountFeature" class="ml-0.5 opacity-75">(0)</span>
+          </button>
+          <button onclick="setReleaseType('Changed')" data-type="Changed"
+            class="type-btn px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200">
+            Changed <span id="btnCountChanged" class="ml-0.5 opacity-75">(0)</span>
+          </button>
+          <button onclick="setReleaseType('Deprecated')" data-type="Deprecated"
+            class="type-btn px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200">
+            Deprecated <span id="btnCountDeprecated" class="ml-0.5 opacity-75">(0)</span>
+          </button>
+          <button onclick="setReleaseType('Fixed')" data-type="Fixed"
+            class="type-btn px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200">
+            Fixed <span id="btnCountFixed" class="ml-0.5 opacity-75">(0)</span>
+          </button>
+          <button onclick="setReleaseType('Announcement')" data-type="Announcement"
+            class="type-btn px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200">
+            Announcement <span id="btnCountAnnouncement" class="ml-0.5 opacity-75">(0)</span>
+          </button>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <input type="text" id="inputSearch" oninput="debounceLoadReleases()"
+            placeholder="Search features, keywords (e.g., AI, MCP, GKE)..."
+            class="w-full xl:w-64 px-3 py-1.5 text-xs sm:text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        </div>
+      </div>
+
+      <!-- Release Notes Feed Grouped by Date -->
+      <div id="releasesContainer" class="space-y-4">
+        <!-- Dynamically populated -->
+      </div>
+
+    </section>
+
+  </main>
+
+  <script>
+    const LANG_STORAGE_KEY = 'gcp_sec_ui_lang';
+
+    const I18N = {
+      en: {
+        pageTitle: 'GCP Security Release Notes Tracker',
+        appTitle: 'GCP Security Release Notes Tracker',
+        appSubtitle: 'Official release notes & recent 7-day updates dashboard for Google Cloud Security products',
+        scheduleActive: (time) => `Auto-update daily at ${time}`,
+        schedulePaused: 'Auto-update paused',
+        adminConsoleBtn: '🔐 Admin Console (/admin)',
+        adminConsoleAuthBtn: (email) => `⚙️ Admin Console (${email})`,
+        productListHeader: 'GCP Security Products',
+        productCountSuffix: (n) => `${n} products`,
+        allProductsTitle: 'View All Security Products',
+        allProductsSub: 'Combined updates across all registered products',
+        statusActive: 'Active',
+        statusInactive: 'Inactive',
+        recentWeekTooltip: (d) => `Updated within last 7 days (${d})`,
+        lastScanLabel: 'Last Scan',
+        latestReleaseLabel: 'Latest Release',
+        cardTotalTitle: 'Total Updates',
+        cardTotalSub: 'Collected items for selection',
+        recentBadgeText: (n, days) => `🔥 ${n} in ${days}d`,
+        cardFeatureTitle: 'New Features (Feature)',
+        cardFeatureSub: 'New security capabilities & rules',
+        cardOtherTitle: 'Changed / Fixed / Deprecated',
+        cardOtherBreakdown: (c, d, f, a) => `Changed ${c} · Deprecated ${d} · Fixed ${f} · Notice ${a}`,
+        cardLastUpdateTitle: 'Last Updated',
+        cardLastUpdateSub: (days) => `Based on last scan date (${days}d highlight)`,
+        btnAll: 'All',
+        btnRecentWeek: (days) => `Last ${days} Days`,
+        searchPlaceholder: 'Search features, keywords (e.g., AI, MCP, GKE)...',
+        emptyReleases: (filter) => `No release notes found matching the selected filter (${filter}).`,
+        dateGroupCount: (n) => `${n} update${n === 1 ? '' : 's'}`,
+        deprecatedNotice: '(Deprecation Notice)',
+        recentItemBadge: (days, ago) => `Recent ${days}d (${ago})`,
+        viewSource: 'View Source ↗',
+        today: 'Today',
+        oneDayAgo: '1 day ago',
+        daysAgo: (n) => `${n} days ago`,
+        signOut: 'Sign Out'
+      },
+      ko: {
+        pageTitle: 'GCP 보안 제품 신규 기능 트래커',
+        appTitle: 'GCP 보안 제품 신규 기능 트래커',
+        appSubtitle: 'Google Cloud 보안 서비스별 공식 릴리즈 노트 및 최근 1주일 신규/변경 내역 대시보드',
+        scheduleActive: (time) => `매일 ${time} 자동 업데이트`,
+        schedulePaused: '자동 업데이트 중지됨',
+        adminConsoleBtn: '🔐 관리자 콘솔 (/admin)',
+        adminConsoleAuthBtn: (email) => `⚙️ 관리자 콘솔 (${email})`,
+        productListHeader: 'GCP 보안 제품 목록',
+        productCountSuffix: (n) => `${n}개`,
+        allProductsTitle: '전체 보안 제품 보기',
+        allProductsSub: '등록된 모든 제품의 수집된 업데이트',
+        statusActive: '활성',
+        statusInactive: '비활성',
+        recentWeekTooltip: (d) => `최근 1주일 이내 업데이트 (${d})`,
+        lastScanLabel: '최종 스캔',
+        latestReleaseLabel: '최신 릴리즈',
+        cardTotalTitle: '전체 업데이트',
+        cardTotalSub: '선택 제품 전체 수집 건수',
+        recentBadgeText: (n, days) => `🔥 ${days}일 내 ${n}건`,
+        cardFeatureTitle: '신규 기능 (Feature)',
+        cardFeatureSub: '새로운 보안 기능 및 탐지 룰',
+        cardOtherTitle: '변경 / 수정 / 공지 / 중단',
+        cardOtherBreakdown: (c, d, f, a) => `변경(Changed) ${c} · 중단(Deprecated) ${d} · 수정(Fixed) ${f} · 공지(Announcement) ${a}`,
+        cardLastUpdateTitle: '최종 업데이트 일',
+        cardLastUpdateSub: (days) => `마지막 스캔 날짜 기준 (최근 ${days}일 강조)`,
+        btnAll: '전체',
+        btnRecentWeek: (days) => `최근 ${days}일 이내`,
+        searchPlaceholder: '기능, 키워드(예: AI, MCP, GKE) 검색...',
+        emptyReleases: (filter) => `선택한 조건(${filter})에 해당하는 릴리즈 노트가 없습니다.`,
+        dateGroupCount: (n) => `${n}건의 업데이트`,
+        deprecatedNotice: '(지원 중단 안내)',
+        recentItemBadge: (days, ago) => `최근 ${days}일 이내 (${ago})`,
+        viewSource: '원문 보기 ↗',
+        today: '오늘',
+        oneDayAgo: '1일 전',
+        daysAgo: (n) => `${n}일 전`,
+        signOut: '로그아웃'
+      }
+    };
+
+    function detectInitialLanguage() {
+      const urlParams = new URLSearchParams(window.location.search);
+      const queryLang = (urlParams.get('lang') || '').toLowerCase();
+      if (queryLang === 'en' || queryLang === 'ko') {
+        localStorage.setItem(LANG_STORAGE_KEY, queryLang);
+        return queryLang;
+      }
+      const saved = localStorage.getItem(LANG_STORAGE_KEY);
+      if (saved === 'en' || saved === 'ko') {
+        return saved;
+      }
+      const navLang = (
+        (navigator.languages && navigator.languages[0]) ||
+        navigator.language ||
+        navigator.userLanguage ||
+        'en'
+      ).toLowerCase();
+      return navLang.startsWith('ko') ? 'ko' : 'en';
+    }
+
+    let currentLang = detectInitialLanguage();
+    let currentProductSlug = 'security-command-center';
+    let currentReleaseType = 'all';
+    let productsCache = [];
+    let allProductReleasesCache = [];
+    let currentUserInfo = { email: 'unauthenticated', is_admin: false };
+    let adminSettings = {
+      auto_update_enabled: true,
+      auto_update_time: '05:00',
+      recent_highlight_days: 7,
+      server_date: null
+    };
+    let searchTimer = null;
+
+    function t() {
+      return I18N[currentLang] || I18N.en;
+    }
+
+    function setLanguage(lang) {
+      if (lang !== 'en' && lang !== 'ko') return;
+      currentLang = lang;
+      localStorage.setItem(LANG_STORAGE_KEY, lang);
+      document.documentElement.lang = lang;
+      applyStaticTranslations();
+      renderProductsList();
+      renderReleasesFeed();
+    }
+
+    function applyStaticTranslations() {
+      const dict = t();
+      const days = adminSettings.recent_highlight_days || 7;
+      const timeStr = adminSettings.auto_update_time || '05:00';
+
+      document.title = dict.pageTitle;
+      document.getElementById('i18nAppTitle').textContent = dict.appTitle;
+      document.getElementById('i18nAppSubtitle').textContent = dict.appSubtitle;
+      document.getElementById('i18nProductListHeader').textContent = dict.productListHeader;
+      document.getElementById('i18nCardTotalTitle').textContent = dict.cardTotalTitle;
+      document.getElementById('i18nCardTotalSub').textContent = dict.cardTotalSub;
+      document.getElementById('i18nCardFeatureTitle').textContent = dict.cardFeatureTitle;
+      document.getElementById('i18nCardFeatureSub').textContent = dict.cardFeatureSub;
+      document.getElementById('i18nCardOtherTitle').textContent = dict.cardOtherTitle;
+      document.getElementById('i18nCardLastUpdateTitle').textContent = dict.cardLastUpdateTitle;
+      document.getElementById('statTodayInfo').textContent = dict.cardLastUpdateSub(days);
+      document.getElementById('i18nBtnAll').textContent = dict.btnAll;
+      document.getElementById('i18nBtnRecentWeek').textContent = dict.btnRecentWeek(days);
+      document.getElementById('inputSearch').placeholder = dict.searchPlaceholder;
+
+      document.getElementById('headerScheduleText').textContent = adminSettings.auto_update_enabled
+        ? dict.scheduleActive(timeStr)
+        : dict.schedulePaused;
+
+      const adminLinkText = document.getElementById('adminConsoleLinkText');
+      if (adminLinkText) {
+        adminLinkText.textContent = (currentUserInfo && currentUserInfo.is_admin)
+          ? dict.adminConsoleAuthBtn(currentUserInfo.email)
+          : dict.adminConsoleBtn;
+      }
+
+      const logoutBtn = document.getElementById('logoutBtnLink');
+      if (logoutBtn) {
+        logoutBtn.textContent = dict.signOut;
+      }
+
+      const btnEN = document.getElementById('langBtnEN');
+      const btnKO = document.getElementById('langBtnKO');
+      if (currentLang === 'en') {
+        btnEN.className = 'px-2.5 py-1 rounded-md transition bg-blue-600 text-white shadow-xs';
+        btnKO.className = 'px-2.5 py-1 rounded-md transition text-slate-400 hover:text-white';
+      } else {
+        btnKO.className = 'px-2.5 py-1 rounded-md transition bg-blue-600 text-white shadow-xs';
+        btnEN.className = 'px-2.5 py-1 rounded-md transition text-slate-400 hover:text-white';
+      }
+    }
+
+    function getTodayDateString() {
+      if (adminSettings.server_date) return adminSettings.server_date;
+      const now = new Date();
+      const yyyy = now.getFullYear();
+      const mm = String(now.getMonth() + 1).padStart(2, '0');
+      const dd = String(now.getDate()).padStart(2, '0');
+      return `${yyyy}-${mm}-${dd}`;
+    }
+
+    function formatScanDate(isoStr) {
+      if (!isoStr) return null;
+      const d = new Date(isoStr);
+      if (isNaN(d.getTime())) {
+        return isoStr.slice(0, 10);
+      }
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      return `${yyyy}-${mm}-${dd}`;
+    }
+
+    function isWithinRecentDays(dateStr) {
+      if (!dateStr) return false;
+      const todayStr = getTodayDateString();
+      const todayMs = Date.parse(todayStr + 'T00:00:00Z');
+      const targetMs = Date.parse(dateStr + 'T00:00:00Z');
+      if (isNaN(todayMs) || isNaN(targetMs)) return false;
+      const diffDays = Math.floor((todayMs - targetMs) / (1000 * 60 * 60 * 24));
+      const limitDays = adminSettings.recent_highlight_days || 7;
+      return diffDays >= 0 && diffDays <= limitDays;
+    }
+
+    function getDaysAgoLabel(dateStr) {
+      const dict = t();
+      const todayStr = getTodayDateString();
+      const todayMs = Date.parse(todayStr + 'T00:00:00Z');
+      const targetMs = Date.parse(dateStr + 'T00:00:00Z');
+      const diffDays = Math.floor((todayMs - targetMs) / (1000 * 60 * 60 * 24));
+      if (diffDays === 0) return dict.today;
+      if (diffDays === 1) return dict.oneDayAgo;
+      return dict.daysAgo(diffDays);
+    }
+
+    function normalizeReleaseCategory(rawType) {
+      const tType = (rawType || '').trim().toLowerCase();
+      if (tType === 'feature') return 'Feature';
+      if (tType === 'change' || tType === 'changed') return 'Changed';
+      if (tType === 'deprecated' || tType === 'deprecation') return 'Deprecated';
+      if (tType === 'fix' || tType === 'fixed' || tType === 'issue') return 'Fixed';
+      if (tType === 'announcement') return 'Announcement';
+      if (tType === 'security') return 'Security';
+      return rawType || 'Update';
+    }
+
+    function getBadgeStyle(type) {
+      const norm = normalizeReleaseCategory(type).toLowerCase();
+      if (norm === 'feature') return 'bg-emerald-100 text-emerald-800 border-emerald-300';
+      if (norm === 'deprecated') return 'bg-rose-100 text-rose-800 border-rose-300';
+      if (norm === 'changed') return 'bg-amber-100 text-amber-800 border-amber-300';
+      if (norm === 'fixed') return 'bg-sky-100 text-sky-800 border-sky-300';
+      if (norm === 'announcement') return 'bg-indigo-100 text-indigo-800 border-indigo-300';
+      if (norm === 'security') return 'bg-purple-100 text-purple-800 border-purple-300';
+      return 'bg-slate-100 text-slate-800 border-slate-300';
+    }
+
+    async function checkCurrentUserAndSettings() {
+      try {
+        const [meRes, settingsRes] = await Promise.all([
+          fetch('/api/me' + window.location.search),
+          fetch('/api/settings')
+        ]);
+        const meData = await meRes.json();
+        const settingsData = await settingsRes.json();
+
+        if (meData) {
+          currentUserInfo = meData;
+        }
+        const adminLink = document.getElementById('adminConsoleLink');
+        if (meData && meData.is_admin) {
+          adminLink.className = 'inline-flex px-3.5 py-1.5 text-xs font-semibold bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-lg shadow transition items-center gap-1.5';
+        } else {
+          adminLink.className = 'inline-flex px-3.5 py-1.5 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/40 rounded-lg shadow transition items-center gap-1.5';
+        }
+
+        if (settingsData && settingsData.settings) {
+          adminSettings = settingsData.settings;
+        }
+        applyStaticTranslations();
+      } catch (e) {
+        console.error('Failed to load user/settings:', e);
+        applyStaticTranslations();
+      }
+    }
+
+    async function loadDashboard() {
+      applyStaticTranslations();
+      await checkCurrentUserAndSettings();
+      await Promise.all([loadProducts(), loadReleases()]);
+    }
+
+    async function loadProducts() {
+      const res = await fetch('/api/products');
+      const data = await res.json();
+      productsCache = data.products || [];
+      renderProductsList();
+    }
+
+    function renderProductsList() {
+      const dict = t();
+      document.getElementById('productCountBadge').textContent = dict.productCountSuffix(productsCache.length);
+
+      const container = document.getElementById('productListContainer');
+      let html = `
+        <button onclick="selectProduct('all')"
+          class="w-full text-left px-4 py-3 transition flex items-center justify-between ${currentProductSlug === 'all' ? 'bg-blue-50/80 border-l-4 border-blue-600' : 'hover:bg-slate-50'}">
+          <div>
+            <div class="text-sm font-semibold text-slate-900">${dict.allProductsTitle}</div>
+            <div class="text-xs text-slate-500">${dict.allProductsSub}</div>
+          </div>
+          <span class="text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">
+            ${productsCache.reduce((acc, p) => acc + (p.total_releases || 0), 0)}
+          </span>
+        </button>
+      `;
+
+      for (const p of productsCache) {
+        const isSelected = currentProductSlug === p.slug;
+        const hasRecentWeekUpdate = isWithinRecentDays(p.latest_release_date);
+        const lastScanDate = formatScanDate(p.last_crawled_at);
+        const enabledBadge = p.enabled
+          ? `<span class="inline-block w-2 h-2 rounded-full bg-emerald-500" title="${dict.statusActive}"></span>`
+          : `<span class="inline-block w-2 h-2 rounded-full bg-slate-300" title="${dict.statusInactive}"></span>`;
+        const recentProductPill = hasRecentWeekUpdate
+          ? `<span class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-bold bg-rose-100 text-rose-700 border border-rose-300 rounded recent-badge-pulse" title="${dict.recentWeekTooltip(p.latest_release_date)}">🔥 NEW</span>`
+          : '';
+        const nameColorClass = hasRecentWeekUpdate ? 'text-rose-700 font-bold' : 'text-slate-900 font-semibold';
+
+        html += `
+          <div class="px-4 py-3 transition ${isSelected ? 'bg-blue-50/80 border-l-4 border-blue-600' : 'hover:bg-slate-50'}">
+            <div class="flex items-start justify-between cursor-pointer" onclick="selectProduct('${p.slug}')">
+              <div class="space-y-0.5 pr-2">
+                <div class="flex flex-wrap items-center gap-1.5">
+                  ${enabledBadge}
+                  <span class="text-sm ${nameColorClass}">${p.name}</span>
+                  ${recentProductPill}
+                </div>
+                <div class="text-xs text-slate-500">${p.category || 'Security'}</div>
+                <div class="text-[11px] text-slate-400">
+                  ${dict.lastScanLabel}: <strong class="text-slate-600">${lastScanDate || '-'}</strong>
+                  ${p.latest_release_date ? ` · ${dict.latestReleaseLabel}: <span class="${hasRecentWeekUpdate ? 'text-rose-600 font-semibold' : 'text-slate-500'}">${p.latest_release_date}</span>` : ''}
+                </div>
+              </div>
+              <span class="text-xs font-bold px-2 py-0.5 rounded-full ${isSelected ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700'}">
+                ${p.total_releases || 0}
+              </span>
+            </div>
+          </div>
+        `;
+      }
+      container.innerHTML = html;
+
+      // Display the last scan date (last_crawled_at) in 'Last Updated' / '최종 업데이트 일'
+      const latestGlobalCrawledAt = productsCache
+        .map(p => p.last_crawled_at)
+        .filter(Boolean)
+        .sort()
+        .pop();
+
+      const selectedProd = productsCache.find(p => p.slug === currentProductSlug);
+      const rawScanTimestamp = (selectedProd && selectedProd.last_crawled_at)
+        ? selectedProd.last_crawled_at
+        : (latestGlobalCrawledAt || adminSettings.last_scheduled_run_at);
+
+      document.getElementById('statCurrentSnapshot').textContent =
+        formatScanDate(rawScanTimestamp) || '-';
+    }
+
+    function selectProduct(slug) {
+      currentProductSlug = slug;
+      loadDashboard();
+    }
+
+    function setReleaseType(type) {
+      currentReleaseType = type;
+      document.querySelectorAll('.type-btn').forEach(btn => {
+        const btnType = btn.dataset.type;
+        if (btnType === type) {
+          if (btnType === 'RECENT_WEEK') {
+            btn.className = 'type-btn px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-600 text-white shadow-xs';
+          } else {
+            btn.className = 'type-btn px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-900 text-white';
+          }
+        } else {
+          if (btnType === 'RECENT_WEEK') {
+            btn.className = 'type-btn px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100';
+          } else {
+            btn.className = 'type-btn px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200';
+          }
+        }
+      });
+      renderReleasesFeed();
+    }
+
+    function debounceLoadReleases() {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(loadReleases, 220);
+    }
+
+    async function loadReleases() {
+      const q = document.getElementById('inputSearch').value.trim();
+      const params = new URLSearchParams({
+        product: currentProductSlug,
+        type: 'all',
+        q: q
+      });
+      const res = await fetch(`/api/releases?${params.toString()}`);
+      const data = await res.json();
+      allProductReleasesCache = data.releases || [];
+      renderReleasesFeed();
+    }
+
+    function renderReleasesFeed() {
+      const dict = t();
+      const daysLimit = adminSettings.recent_highlight_days || 7;
+      const allItems = allProductReleasesCache;
+
+      const counts = {
+        all: allItems.length,
+        recent: 0,
+        Feature: 0,
+        Changed: 0,
+        Deprecated: 0,
+        Fixed: 0,
+        Announcement: 0,
+        otherTotal: 0
+      };
+
+      for (const item of allItems) {
+        const cat = normalizeReleaseCategory(item.release_type);
+        if (isWithinRecentDays(item.release_date)) {
+          counts.recent += 1;
+        }
+        if (cat === 'Feature') {
+          counts.Feature += 1;
+        } else {
+          counts.otherTotal += 1;
+          if (cat === 'Changed') counts.Changed += 1;
+          else if (cat === 'Deprecated') counts.Deprecated += 1;
+          else if (cat === 'Fixed') counts.Fixed += 1;
+          else if (cat === 'Announcement') counts.Announcement += 1;
+        }
+      }
+
+      document.getElementById('statTotalCount').textContent = counts.all;
+      document.getElementById('statRecentBadge').textContent = dict.recentBadgeText(counts.recent, daysLimit);
+      document.getElementById('statFeatureCount').textContent = counts.Feature;
+      document.getElementById('statOtherCount').textContent = counts.otherTotal;
+      document.getElementById('statOtherBreakdown').textContent =
+        dict.cardOtherBreakdown(counts.Changed, counts.Deprecated, counts.Fixed, counts.Announcement);
+
+      document.getElementById('btnCountAll').textContent = `(${counts.all})`;
+      document.getElementById('btnCountRecent').textContent = `(${counts.recent})`;
+      document.getElementById('btnCountFeature').textContent = `(${counts.Feature})`;
+      document.getElementById('btnCountChanged').textContent = `(${counts.Changed})`;
+      document.getElementById('btnCountDeprecated').textContent = `(${counts.Deprecated})`;
+      document.getElementById('btnCountFixed').textContent = `(${counts.Fixed})`;
+      document.getElementById('btnCountAnnouncement').textContent = `(${counts.Announcement})`;
+
+      const items = allItems.filter(item => {
+        if (currentReleaseType === 'all') return true;
+        if (currentReleaseType === 'RECENT_WEEK') return isWithinRecentDays(item.release_date);
+        return normalizeReleaseCategory(item.release_type) === currentReleaseType;
+      });
+
+      const container = document.getElementById('releasesContainer');
+      if (items.length === 0) {
+        container.innerHTML = `
+          <div class="bg-white rounded-xl border border-slate-200 p-12 text-center space-y-3">
+            <div class="text-slate-400 text-sm">${dict.emptyReleases(currentReleaseType)}</div>
+          </div>
+        `;
+        return;
+      }
+
+      const grouped = {};
+      for (const item of items) {
+        if (!grouped[item.release_date]) {
+          grouped[item.release_date] = {
+            display: item.release_date_display,
+            items: []
+          };
+        }
+        grouped[item.release_date].items.push(item);
+      }
+
+      let html = '';
+      for (const [dateKey, group] of Object.entries(grouped)) {
+        // Keep date header neutral so items sharing the same date are not falsely highlighted
+        html += `
+          <div class="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
+            <div class="px-5 py-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+              <div class="flex items-center gap-2">
+                <span class="text-sm font-bold text-slate-900">${dateKey}</span>
+                <span class="text-xs text-slate-500">(${group.display})</span>
+              </div>
+              <span class="text-xs font-semibold text-slate-500">${dict.dateGroupCount(group.items.length)}</span>
+            </div>
+            <div class="divide-y divide-slate-100">
+        `;
+
+        for (const item of group.items) {
+          const normCategory = normalizeReleaseCategory(item.release_type);
+          const isDeprecatedItem = normCategory === 'Deprecated';
+          const badgeClass = getBadgeStyle(normCategory);
+          const isItemRecent = isWithinRecentDays(item.release_date);
+          const daysAgoText = isItemRecent ? getDaysAgoLabel(item.release_date) : '';
+
+          const linksHtml = (item.links || []).slice(0, 4).map(l => `
+            <a href="${l.url}" target="_blank" rel="noopener"
+              class="inline-flex items-center gap-1 text-xs font-medium text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 px-2.5 py-1 rounded-md transition">
+              <span>🔗 ${l.title}</span>
+            </a>
+          `).join('');
+
+          const articleHighlightClass = isDeprecatedItem
+            ? 'bg-slate-50/70 border-l-4 border-[#0b1f44] hover:bg-slate-100/70'
+            : (isItemRecent
+                ? 'bg-rose-50/20 border-l-4 border-rose-500 hover:bg-rose-50/40'
+                : 'hover:bg-slate-50/50');
+
+          const contentToneClass = isDeprecatedItem
+            ? 'release-deprecated'
+            : (isItemRecent ? 'release-recent' : 'release-normal');
+
+          // Build the emphasized [TYPE + Product_Name] header bar per item
+          let itemHeaderHtml = '';
+          if (isDeprecatedItem) {
+            // Navy highlight specifically on the DEPRECATED + Product_Name header bar
+            itemHeaderHtml = `
+              <div class="flex flex-wrap items-center justify-between gap-2 bg-[#0b1f44] text-white px-3.5 py-2 rounded-lg shadow-2xs">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="px-2.5 py-0.5 text-xs font-extrabold uppercase tracking-wide rounded bg-amber-400 text-slate-950">
+                    ⚠️ ${normCategory}
+                  </span>
+                  <span class="text-xs sm:text-sm font-bold text-white">
+                    ${item.product_name}
+                  </span>
+                  <span class="text-[11px] font-medium text-blue-200">
+                    ${dict.deprecatedNotice}
+                  </span>
+                  ${isItemRecent ? `
+                    <span class="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold bg-rose-500 text-white rounded-md">
+                      🔥 ${dict.recentItemBadge(daysLimit, daysAgoText)}
+                    </span>
+                  ` : ''}
+                </div>
+                <a href="${item.source_url}" target="_blank" rel="noopener"
+                  class="text-xs text-blue-200 hover:text-white flex items-center gap-1 font-medium">
+                  <span>${dict.viewSource}</span>
+                </a>
+              </div>
+            `;
+          } else if (isItemRecent) {
+            // 1-Week highlight specifically on the FEATURE/CHANGED + Product_Name header bar
+            itemHeaderHtml = `
+              <div class="flex flex-wrap items-center justify-between gap-2 bg-gradient-to-r from-rose-600 via-rose-500 to-amber-500 text-white px-3.5 py-2 rounded-lg shadow-2xs">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="px-2.5 py-0.5 text-xs font-extrabold uppercase tracking-wide rounded bg-white text-rose-700">
+                    🔥 ${normCategory}
+                  </span>
+                  <span class="text-xs sm:text-sm font-bold text-white">
+                    ${item.product_name}
+                  </span>
+                  <span class="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold bg-black/20 text-white rounded-md">
+                    ✨ ${dict.recentItemBadge(daysLimit, daysAgoText)}
+                  </span>
+                </div>
+                <a href="${item.source_url}" target="_blank" rel="noopener"
+                  class="text-xs text-rose-100 hover:text-white flex items-center gap-1 font-medium">
+                  <span>${dict.viewSource}</span>
+                </a>
+              </div>
+            `;
+          } else {
+            // Standard neutral item header bar
+            itemHeaderHtml = `
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="flex items-center gap-2">
+                  <span class="px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide rounded border ${badgeClass}">
+                    ${normCategory}
+                  </span>
+                  <span class="text-xs font-semibold text-slate-700 bg-slate-100 px-2.5 py-0.5 rounded">
+                    ${item.product_name}
+                  </span>
+                </div>
+                <a href="${item.source_url}" target="_blank" rel="noopener"
+                  class="text-xs text-slate-400 hover:text-blue-600 flex items-center gap-1">
+                  <span>${dict.viewSource}</span>
+                </a>
+              </div>
+            `;
+          }
+
+          html += `
+            <article class="p-5 transition space-y-2.5 ${articleHighlightClass}">
+              ${itemHeaderHtml}
+
+              <!-- Release Note Content -->
+              <div class="release-html ${contentToneClass} text-sm text-slate-700 pl-0.5">
+                ${item.content_html}
+              </div>
+
+              ${linksHtml ? `<div class="pt-1 flex flex-wrap gap-1.5">${linksHtml}</div>` : ''}
+            </article>
+          `;
+        }
+
+        html += `</div></div>`;
+      }
+
+      container.innerHTML = html;
+    }
+
+    window.addEventListener('DOMContentLoaded', loadDashboard);
+  </script>
+</body>
+</html>
