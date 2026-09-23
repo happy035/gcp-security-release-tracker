@@ -1,10 +1,12 @@
 import hashlib
 import html
+import ipaddress
 import re
+import socket
 from datetime import datetime
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -272,6 +274,95 @@ def parse_gcp_release_notes_html(
     return parsed_items
 
 
+ALLOWED_RELEASE_NOTE_DOMAINS = {
+    "cloud.google.com",
+    "docs.cloud.google.com",
+}
+
+
+def is_allowed_domain(hostname: str) -> bool:
+    """Check if the given hostname is an allowed Google Cloud documentation domain."""
+    hostname = hostname.lower().strip()
+    return hostname in ALLOWED_RELEASE_NOTE_DOMAINS or hostname.endswith(".cloud.google.com")
+
+
+def validate_release_notes_url(url: str) -> None:
+    """
+    Validate that release_notes_url points to an authorized Google Cloud documentation endpoint.
+    Prevents Server-Side Request Forgery (SSRF) and access to internal/private resources.
+    """
+    if not url or not isinstance(url, str):
+        raise ValueError("URL이 비어 있습니다.")
+
+    url = url.strip()
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        raise ValueError("유효하지 않은 URL 형식입니다.")
+
+    if parsed.scheme.lower() != "https":
+        raise ValueError("HTTPS 프로토콜만 허용됩니다.")
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("호스트명이 유효하지 않습니다.")
+
+    hostname = hostname.lower().strip()
+
+    if parsed.username or parsed.password:
+        raise ValueError("사용자 인증 정보가 포함된 URL은 허용되지 않습니다.")
+
+    if parsed.port is not None and parsed.port != 443:
+        raise ValueError("표준 HTTPS 포트(443)만 허용됩니다.")
+
+    # Reject IP address literals directly
+    try:
+        ipaddress.ip_address(hostname)
+        raise ValueError("IP 주소 직접 접근은 허용되지 않습니다.")
+    except ValueError as val_err:
+        if "IP 주소 직접 접근" in str(val_err):
+            raise
+
+    # Hostname whitelist
+    if not is_allowed_domain(hostname):
+        raise ValueError(
+            "허용되지 않은 도메인입니다. Google Cloud 공식 문서 도메인만 지원됩니다."
+        )
+
+    # Check DNS resolution for internal/private/link-local IP addresses
+    try:
+        addr_info = socket.getaddrinfo(hostname, 443, proto=socket.IPPROTO_TCP)
+        for entry in addr_info:
+            sockaddr = entry[4]
+            ip_str = sockaddr[0]
+            try:
+                ip = ipaddress.ip_address(ip_str)
+                if (
+                    ip.is_loopback
+                    or ip.is_private
+                    or ip.is_link_local
+                    or ip.is_multicast
+                    or ip.is_reserved
+                    or ip.is_unspecified
+                ):
+                    raise ValueError("내부 또는 비공개 IP 주소는 허용되지 않습니다.")
+            except ValueError as ip_err:
+                if "내부 또는 비공개 IP" in str(ip_err):
+                    raise
+    except socket.gaierror:
+        # If DNS cannot be resolved (e.g. offline environment/isolated test sandbox),
+        # the domain has already been strictly validated against allowed Google Cloud domains.
+        pass
+
+
+class SSRFSafeSession(requests.Session):
+    """Requests Session that validates destination URL on every request and redirect."""
+
+    def send(self, request, **kwargs):
+        validate_release_notes_url(request.url)
+        return super().send(request, **kwargs)
+
+
 class GCPSecurityReleaseCrawler:
     """Fetches GCP Security product release notes and scans updates after the snapshot date."""
 
@@ -279,13 +370,15 @@ class GCPSecurityReleaseCrawler:
         self.db = db or ReleaseDatabase()
 
     def fetch_html(self, url: str, timeout: int = 25) -> str:
-        resp = requests.get(
-            url,
-            headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        return resp.text
+        validate_release_notes_url(url)
+        with SSRFSafeSession() as session:
+            resp = session.get(
+                url,
+                headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            return resp.text
 
     def crawl_product(
         self,
@@ -355,7 +448,17 @@ class GCPSecurityReleaseCrawler:
                 "snapshot_id": snapshot_record["id"],
             }
         except Exception as exc:
-            err_msg = f"크롤링 실패 ({url}): {exc}"
+            if isinstance(exc, ValueError):
+                err_msg = f"크롤링 실패 ({url}): {exc}"
+            elif isinstance(exc, requests.Timeout):
+                err_msg = f"크롤링 실패 ({url}): 요청 시간이 초과되었습니다."
+            elif isinstance(exc, requests.HTTPError):
+                code = exc.response.status_code if exc.response is not None else ""
+                err_msg = f"크롤링 실패 ({url}): 원격 서버 HTTP 오류 ({code})"
+            elif isinstance(exc, requests.RequestException):
+                err_msg = f"크롤링 실패 ({url}): 원격 서버에 연결할 수 없습니다."
+            else:
+                err_msg = f"크롤링 실패 ({url}): 데이터 처리 중 오류가 발생했습니다."
             self.db.record_crawl_result(
                 product_id=product["id"],
                 baseline_date=baseline_date,
