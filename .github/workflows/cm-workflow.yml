@@ -1,0 +1,479 @@
+name: Code Mender Security Scan & Auto-Fix
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  security-events: write
+  id-token: write # Required for Workload Identity Federation (GCP OIDC auth)
+
+env:
+  # GCS 버킷 및 경로 설정 (GitHub Repository Variables 또는 Secrets: GCS_BUCKET_NAME)
+  GCS_BUCKET: ${{ vars.GCS_BUCKET_NAME || secrets.GCS_BUCKET_NAME }}
+  GCS_CONFIG_DIR: ${{ vars.GCS_CONFIG_DIR || secrets.GCS_CONFIG_DIR }}
+
+jobs:
+  codemender-analysis:
+    name: Code Mender Scan, Verify & Fix
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Git User
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      # ----------------------------------------------------------------------
+      # 0. Python 실행 환경 및 의존성 설정
+      # ----------------------------------------------------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python Dependencies & Verify Syntax
+        run: |
+          echo "=== Installing Python Dependencies ==="
+          python3 -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+
+          echo "=== Compiling & Verifying Python Source Files ==="
+          python3 -m py_compile cli.py
+          python3 -m py_compile src/*.py
+
+      # ----------------------------------------------------------------------
+      # 1. Google Cloud 인증 및 Cloud SDK 설정
+      # ----------------------------------------------------------------------
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          # 방법 1: Workload Identity Federation (권장)
+          # workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          # service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+          # 방법 2: Service Account Key JSON
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          create_credentials_file: false
+          export_environment_variables: false
+
+      - name: Configure Application Default Credentials (ADC)
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          mkdir -p ~/.config/gcloud
+          echo "$GCP_SA_KEY" > /tmp/gcp_credentials.json
+          echo "$GCP_SA_KEY" > ~/.config/gcloud/application_default_credentials.json
+          chmod 600 /tmp/gcp_credentials.json ~/.config/gcloud/application_default_credentials.json
+
+          echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp_credentials.json" >> $GITHUB_ENV
+
+          # gcloud CLI에서 해당 Service Account 활성화
+          gcloud auth activate-service-account --key-file=/tmp/gcp_credentials.json
+
+          # Project ID 추출 및 환경설정
+          PROJECT_ID=$(python3 -c 'import json, os; print(json.loads(os.environ.get("GCP_SA_KEY", "{}")).get("project_id", ""))')
+          if [ -n "$PROJECT_ID" ]; then
+            echo "CLOUDSDK_CORE_PROJECT=$PROJECT_ID" >> $GITHUB_ENV
+            echo "GOOGLE_CLOUD_PROJECT=$PROJECT_ID" >> $GITHUB_ENV
+            gcloud config set project "$PROJECT_ID" || true
+          fi
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # ----------------------------------------------------------------------
+      # 2. Google Artifact Registry에서 최신 Code Mender CLI (cm) 다운로드 및 설치
+      # ----------------------------------------------------------------------
+      - name: Download & Install Code Mender CLI from Artifact Registry
+        run: |
+          echo "=== Fetching GCP Access Token for Artifact Registry ==="
+          ACCESS_TOKEN=$(gcloud auth print-access-token)
+
+          # OS 및 아키텍처 자동 감지 (Linux amd64 / macOS arm64 지원)
+          OS_NAME=$(uname -s | tr '[:upper:]' '[:lower:]')
+          ARCH_NAME=$(uname -m)
+          case $ARCH_NAME in
+            x86_64) ARCH="amd64" ;;
+            aarch64|arm64) ARCH="arm64" ;;
+            *) ARCH="amd64" ;;
+          esac
+
+          ZIP_FILE="cm-${OS_NAME}-${ARCH}.zip"
+          ENCODED_TARGET="cm%3Astable%3A${ZIP_FILE}"
+          DOWNLOAD_URL="https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/${ENCODED_TARGET}:download?alt=media"
+
+          echo "=== Downloading Code Mender package: ${ZIP_FILE} ==="
+          mkdir -p /tmp/cm-install
+          if ! curl -fsSL -H "Authorization: Bearer ${ACCESS_TOKEN}" -o "/tmp/cm-install/${ZIP_FILE}" "${DOWNLOAD_URL}"; then
+            echo "[ERROR] Failed to download Code Mender CLI from Artifact Registry. Check IAM permissions for Artifact Registry Reader." >&2
+            exit 1
+          fi
+
+          echo "=== Extracting and installing cm binary ==="
+          unzip -o "/tmp/cm-install/${ZIP_FILE}" -d /tmp/cm-install/extracted/
+
+          # 압축 해제된 디렉토리 내 cm 바이너리 탐색 및 설치
+          CM_BIN=$(find /tmp/cm-install/extracted/ -type f -name "cm" | head -n 1)
+          if [ -z "$CM_BIN" ]; then
+            echo "[ERROR] 'cm' executable not found in unzipped package." >&2
+            exit 1
+          fi
+
+          chmod +x "$CM_BIN"
+          sudo mv "$CM_BIN" /usr/local/bin/cm
+
+          echo "=== Verifying Code Mender installation ==="
+          cm --version || cm -v
+
+      # ----------------------------------------------------------------------
+      # 3. Code Mender 초기화 (cm init) 및 GCS 환경설정 동기화
+      # ----------------------------------------------------------------------
+      - name: Initialize Code Mender & Restore Config from GCS
+        run: |
+          echo "=== Initializing Code Mender environment ==="
+          cm init
+
+          RAW_BUCKET="${GCS_BUCKET:-}"
+          CLEAN_BUCKET=$(echo "$RAW_BUCKET" | sed -e 's|^gs://||' -e 's|/*$||')
+          GCS_TARGET_DIR="${GCS_CONFIG_DIR:-codemender-config}"
+
+          if [ -n "$CLEAN_BUCKET" ] && [ "$CLEAN_BUCKET" != "true" ] && [ "$CLEAN_BUCKET" != "false" ]; then
+            echo "=== Restoring configuration & state from GCS (gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}) ==="
+            mkdir -p ~/.codemender
+
+            # 1) 전체 아카이브(state.tar.gz) 복원 시도
+            if gcloud storage ls "gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}/state.tar.gz" 2>/dev/null; then
+              echo "[INFO] Found state.tar.gz in ${GCS_TARGET_DIR}, extracting to ~/.codemender..."
+              gcloud storage cp "gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}/state.tar.gz" /tmp/state.tar.gz
+              tar -xzf /tmp/state.tar.gz -C ~/ || true
+            elif gcloud storage ls "gs://${CLEAN_BUCKET}/state.tar.gz" 2>/dev/null; then
+              echo "[INFO] Found state.tar.gz in bucket root, extracting to ~/.codemender..."
+              gcloud storage cp "gs://${CLEAN_BUCKET}/state.tar.gz" /tmp/state.tar.gz
+              tar -xzf /tmp/state.tar.gz -C ~/ || true
+            else
+              echo "[INFO] No previous state.tar.gz found in GCS. Starting with fresh state."
+            fi
+
+            # 2) 개별 config.yaml 및 state.db 복원 (단독 파일이 더 최신인 경우 대비)
+            if gcloud storage ls "gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}/config.yaml" 2>/dev/null; then
+              echo "[INFO] Restoring remote config.yaml from GCS..."
+              gcloud storage cp "gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}/config.yaml" ~/.codemender/config.yaml || true
+            elif gcloud storage ls "gs://${CLEAN_BUCKET}/config.yaml" 2>/dev/null; then
+              gcloud storage cp "gs://${CLEAN_BUCKET}/config.yaml" ~/.codemender/config.yaml || true
+            fi
+
+            if gcloud storage ls "gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}/state.db" 2>/dev/null; then
+              echo "[INFO] Restoring remote state.db from GCS..."
+              gcloud storage cp "gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}/state.db" ~/.codemender/state.db || true
+            elif gcloud storage ls "gs://${CLEAN_BUCKET}/state.db" 2>/dev/null; then
+              gcloud storage cp "gs://${CLEAN_BUCKET}/state.db" ~/.codemender/state.db || true
+            fi
+          else
+            echo "[INFO] GCS_BUCKET_NAME not configured or invalid ('$GCS_BUCKET'). Skipping GCS config restore."
+          fi
+
+          # 설정 검증
+          cm init --verify
+
+      # ----------------------------------------------------------------------
+      # 3.5 변경된 소스코드 파일 탐지 (증분 스캔)
+      # ----------------------------------------------------------------------
+      - name: Detect Changed Source Files (Incremental Scan)
+        id: detect_changes
+        run: |
+          echo "=== Detecting Changed Files in this Push/PR ==="
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            CHANGED_FILES=$(git diff --name-only --diff-filter=d origin/${{ github.base_ref }}...HEAD)
+          elif [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            CHANGED_FILES=$(git diff --name-only --diff-filter=d ${{ github.event.before }} ${{ github.sha }})
+          else
+            CHANGED_FILES=$(git diff --name-only --diff-filter=d HEAD~1 HEAD 2>/dev/null || git ls-files)
+          fi
+
+          echo "All modified files:"
+          echo "$CHANGED_FILES"
+
+          # 소스 코드 확장자 필터링 (Python 및 웹 애플리케이션 파일)
+          TARGET_FILES=""
+          for f in $CHANGED_FILES; do
+            if [ -f "$f" ]; then
+              case "$f" in
+                *.py|*.html|*.json|Dockerfile|requirements.txt)
+                  TARGET_FILES="$TARGET_FILES $f"
+                  ;;
+              esac
+            fi
+          done
+
+          # 수동 실행(workflow_dispatch) 시 변경 파일이 없으면 전체 저장소 스캔
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -z "$TARGET_FILES" ]; then
+            echo "Workflow manually dispatched. Scanning entire repository."
+            TARGET_FILES="."
+          fi
+
+          if [ -z "$TARGET_FILES" ]; then
+            echo "[INFO] No source code files modified in this push. Skipping Code Mender scan."
+            echo "skip_scan=true" >> $GITHUB_OUTPUT
+            echo "targets=" >> $GITHUB_OUTPUT
+          else
+            echo "[INFO] Target source files to scan: $TARGET_FILES"
+            echo "skip_scan=false" >> $GITHUB_OUTPUT
+            echo "targets=$TARGET_FILES" >> $GITHUB_OUTPUT
+          fi
+
+      # ----------------------------------------------------------------------
+      # 4. 소스코드 취약점 스캔 (cm find - 증분 스캔)
+      # ----------------------------------------------------------------------
+      - name: Run Code Mender Scan (find)
+        id: cm_scan
+        if: steps.detect_changes.outputs.skip_scan != 'true'
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/gcp_credentials.json
+          TARGETS: ${{ steps.detect_changes.outputs.targets }}
+        run: |
+          echo "=== 4. Running Code Mender Scan on modified targets ==="
+          for target in $TARGETS; do
+            echo "--> Scanning target: $target"
+            cm find "$target" -y --sandbox=false --bypass-warning
+          done
+
+      # ----------------------------------------------------------------------
+      # 5. 취약점 검증 (cm verify) 및 자동 패치 브랜치 생성 (cm fix)
+      # ----------------------------------------------------------------------
+      - name: Verify Findings & Create Fix Branches (Pre-PR stage)
+        id: cm_verify_and_fix
+        if: steps.detect_changes.outputs.skip_scan != 'true'
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/gcp_credentials.json
+        run: |
+          python3 - << 'EOF'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          print("=== 5. Retrieving Findings Report ===")
+          report_proc = subprocess.run(["cm", "report", "-f", "json"], capture_output=True, text=True)
+          if report_proc.returncode != 0:
+              print(f"[ERROR] cm report failed (exit {report_proc.returncode}):\n{report_proc.stderr}", file=sys.stderr)
+              sys.exit(1)
+          try:
+              findings = json.loads(report_proc.stdout)
+          except json.JSONDecodeError as e:
+              print(f"[ERROR] Failed to parse findings report as JSON: {e}", file=sys.stderr)
+              print(f"Raw output: {report_proc.stdout[:500]}", file=sys.stderr)
+              sys.exit(1)
+
+          print(f"Total findings identified: {len(findings)}")
+
+          # PR 및 Push 환경 모두에서 안전하도록 기준 Commit SHA 확보
+          base_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          repo_name = os.environ.get("GITHUB_REPOSITORY", "")
+
+          for idx, finding in enumerate(findings, 1):
+              finding_id = finding.get("FindingID")
+              title = finding.get("Title", "Security Vulnerability")
+              severity = finding.get("Severity", "UNKNOWN")
+              status = finding.get("Status", "OPEN")
+
+              if not finding_id or status == "FIXED":
+                  continue
+
+              print(f"\n[{idx}/{len(findings)}] Processing Finding: {finding_id}")
+              print(f"    Title: {title}")
+              print(f"    Severity: {severity} | Current Status: {status}")
+
+              try:
+                  # (1) 취약점 검증 (cm verify)
+                  print(f"--> Step 1: Verifying vulnerability with 'cm verify {finding_id} -y --sandbox=false --bypass-warning'...")
+                  verify_proc = subprocess.run(["cm", "verify", finding_id, "-y", "--sandbox=false", "--bypass-warning"], capture_output=True, text=True)
+                  print(verify_proc.stdout)
+
+                  if verify_proc.returncode != 0:
+                      print(f"[-] Verification failed or dismissed for {finding_id}. Skipping fix.")
+                      continue
+
+                  print(f"[+] Finding {finding_id} successfully verified.")
+
+                  # (2) 기준 커밋(base_commit)으로부터 Finding 전용 브랜치 생성 및 체크아웃
+                  safe_id = finding_id.replace("/", "-").replace(".", "-")
+                  branch_name = f"cm-fix/{safe_id}"
+                  print(f"--> Step 2: Creating and checking out branch '{branch_name}' from commit '{base_commit[:8]}'...")
+                  subprocess.run(["git", "checkout", "-B", branch_name, base_commit], check=True)
+
+                  # (3) cm fix로 보안 패치 적용
+                  print(f"--> Step 3: Generating and applying fix with 'cm fix {finding_id} -y --sandbox=false --bypass-warning'...")
+                  fix_proc = subprocess.run(["cm", "fix", finding_id, "-y", "--sandbox=false", "--bypass-warning"], capture_output=True, text=True)
+                  print(fix_proc.stdout)
+
+                  if fix_proc.returncode != 0:
+                      print(f"[-] cm fix failed for {finding_id} (exit {fix_proc.returncode}), skipping commit.", file=sys.stderr)
+                      print(fix_proc.stderr, file=sys.stderr)
+                      continue
+
+                  # (4) 코드 변경사항 커밋
+                  status_proc = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
+                  if status_proc.stdout.strip():
+                      print(f"--> Step 4: Staging and committing changes on branch '{branch_name}'...")
+                      subprocess.run(["git", "add", "."], check=True)
+                      commit_message = f"fix(security): resolve {title}\n\nCode Mender Finding ID: {finding_id}\nSeverity: {severity}"
+                      subprocess.run(["git", "commit", "-m", commit_message], check=True)
+
+                      # (5) 원격 저장소로 브랜치 Push
+                      print(f"--> Step 5: Pushing branch '{branch_name}' to origin...")
+                      push_proc = subprocess.run(["git", "push", "-u", "origin", branch_name, "--force"], capture_output=True, text=True)
+                      if push_proc.returncode == 0:
+                          print(f"[SUCCESS] Branch '{branch_name}' successfully pushed to remote.")
+
+                          # (6) GitHub CLI (gh)를 통한 Pull Request 자동 생성
+                          print(f"--> Step 6: Creating Pull Request for '{branch_name}' into 'main'...")
+                          pr_title = f"fix(security): resolve {title} ({finding_id[:8]})"
+                          pr_body = (
+                              f"### 🛡️ Code Mender Security Patch\n\n"
+                              f"- **Vulnerability Title**: {title}\n"
+                              f"- **Finding ID**: `{finding_id}`\n"
+                              f"- **Severity**: `{severity}`\n"
+                              f"- **Status**: `VERIFIED & FIXED`\n\n"
+                              f"#### 📝 Description\n"
+                              f"This automated Pull Request was generated by [Code Mender](https://cloud.google.com) "
+                              f"after finding, verifying, and testing an exploit fix against this codebase."
+                          )
+
+                          # 이미 열려있는 PR이 있는지 확인
+                          pr_check = subprocess.run(
+                              ["gh", "pr", "list", "--repo", repo_name, "--head", branch_name, "--state", "open", "--json", "number,url"],
+                              capture_output=True, text=True, env=os.environ
+                          )
+                          try:
+                              existing_prs = json.loads(pr_check.stdout) if pr_check.returncode == 0 and pr_check.stdout.strip() else []
+                          except Exception:
+                              existing_prs = []
+
+                          if existing_prs:
+                              print(f"[INFO] Pull Request already exists: {existing_prs[0].get('url', '')}")
+                          else:
+                              pr_create_proc = subprocess.run(
+                                  [
+                                      "gh", "pr", "create",
+                                      "--repo", repo_name,
+                                      "--base", "main",
+                                      "--head", branch_name,
+                                      "--title", pr_title,
+                                      "--body", pr_body
+                                  ],
+                                  capture_output=True, text=True, env=os.environ
+                              )
+                              if pr_create_proc.returncode == 0:
+                                  print(f"[SUCCESS] Pull Request created successfully:\n{pr_create_proc.stdout.strip()}")
+                              else:
+                                  print(f"[WARN] Failed to create Pull Request: {pr_create_proc.stderr.strip()}", file=sys.stderr)
+                      else:
+                          print(f"[ERROR] Failed to push branch: {push_proc.stderr}", file=sys.stderr)
+                  else:
+                      print(f"[-] No file changes were generated by 'cm fix' for finding {finding_id}.")
+
+              except subprocess.CalledProcessError as e:
+                  print(f"[ERROR] Git command failed for finding {finding_id}: {e}", file=sys.stderr)
+              finally:
+                  # 다음 검증을 위해 원본 베이스 커밋으로 복귀
+                  subprocess.run(["git", "checkout", base_commit])
+
+          print("\n=== All findings processed successfully ===")
+          EOF
+
+      # ----------------------------------------------------------------------
+      # 6. 실행 결과 상태 및 로그를 GCS에 백업/동기화 (러너 종료 전 상태 보존)
+      # ----------------------------------------------------------------------
+      - name: Backup Code Mender State & Logs to GCS
+        if: always()
+        run: |
+          RAW_BUCKET="${GCS_BUCKET:-}"
+          CLEAN_BUCKET=$(echo "$RAW_BUCKET" | sed -e 's|^gs://||' -e 's|/*$||')
+          GCS_TARGET_DIR="${GCS_CONFIG_DIR:-codemender-config}"
+
+          echo "=== 6. Code Mender State Backup ==="
+          echo "Configured GCS_BUCKET: '$RAW_BUCKET'"
+          echo "Cleaned Bucket Name:   '$CLEAN_BUCKET'"
+          echo "Target Directory:      '$GCS_TARGET_DIR'"
+          echo "GitHub Run ID:         '${{ github.run_id }}'"
+
+          echo "--- Local ~/.codemender Directory Contents ---"
+          if [ -d ~/.codemender ]; then
+            ls -la ~/.codemender
+          else
+            echo "[WARN] ~/.codemender directory does not exist!"
+          fi
+
+          if [ -n "$CLEAN_BUCKET" ] && [ "$CLEAN_BUCKET" != "true" ] && [ "$CLEAN_BUCKET" != "false" ]; then
+            echo "=== Uploading state & artifacts to gs://${CLEAN_BUCKET} ==="
+
+            # 1) ~/.codemender 전체 아카이브(state.tar.gz) 압축 및 업로드 (루트 및 타겟 디렉토리 양쪽)
+            if [ -d ~/.codemender ]; then
+              echo "--> Creating and uploading state.tar.gz..."
+              tar -czf /tmp/state.tar.gz -C ~ .codemender
+              gcloud storage cp /tmp/state.tar.gz "gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}/state.tar.gz" || echo "[ERROR] Failed uploading state.tar.gz to ${GCS_TARGET_DIR}"
+              gcloud storage cp /tmp/state.tar.gz "gs://${CLEAN_BUCKET}/state.tar.gz" || echo "[ERROR] Failed uploading state.tar.gz to bucket root"
+            fi
+
+            # 2) 개별 state.db 직접 백업 (루트 및 타겟 디렉토리)
+            if [ -f ~/.codemender/state.db ]; then
+              echo "--> Uploading state.db..."
+              gcloud storage cp ~/.codemender/state.db "gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}/state.db" || echo "[ERROR] Failed uploading state.db to ${GCS_TARGET_DIR}"
+              gcloud storage cp ~/.codemender/state.db "gs://${CLEAN_BUCKET}/state.db" || echo "[ERROR] Failed uploading state.db to bucket root"
+            else
+              echo "[INFO] ~/.codemender/state.db not found (no scan findings persisted)."
+            fi
+
+            # 3) config.yaml 및 audit.log 백업
+            if [ -f ~/.codemender/config.yaml ]; then
+              echo "--> Uploading config.yaml..."
+              gcloud storage cp ~/.codemender/config.yaml "gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}/config.yaml" || true
+              gcloud storage cp ~/.codemender/config.yaml "gs://${CLEAN_BUCKET}/config.yaml" || true
+            fi
+            if [ -f ~/.codemender/audit.log ]; then
+              echo "--> Uploading audit.log..."
+              gcloud storage cp ~/.codemender/audit.log "gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}/audit.log" || true
+              gcloud storage cp ~/.codemender/audit.log "gs://${CLEAN_BUCKET}/audit.log" || true
+            fi
+
+            # 4) 실행 로그 및 아티팩트 디렉토리 백업 (Run ID 단위 격리)
+            if [ -d ~/.codemender/logs ]; then
+              echo "--> Uploading logs..."
+              gcloud storage cp -r ~/.codemender/logs "gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}/logs/${{ github.run_id }}/" || true
+              gcloud storage cp -r ~/.codemender/logs "gs://${CLEAN_BUCKET}/logs/${{ github.run_id }}/" || true
+            fi
+
+            if [ -d ~/.codemender/artifacts ]; then
+              echo "--> Uploading artifacts..."
+              gcloud storage cp -r ~/.codemender/artifacts "gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}/artifacts/${{ github.run_id }}/" || true
+              gcloud storage cp -r ~/.codemender/artifacts "gs://${CLEAN_BUCKET}/artifacts/${{ github.run_id }}/" || true
+            fi
+
+            echo "[SUCCESS] GCS Backup process completed."
+          else
+            echo "[ERROR] GCS_BUCKET is empty or invalid ('$RAW_BUCKET')."
+            echo "[ACTION REQUIRED] Set 'GCS_BUCKET_NAME' in GitHub Repository Variables (Settings -> Secrets and variables -> Actions -> Variables) or Repository Secrets."
+          fi
