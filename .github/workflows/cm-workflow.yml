@@ -4,9 +4,13 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - '.github/**'
   pull_request:
     branches:
       - main
+    paths-ignore:
+      - '.github/**'
   workflow_dispatch:
 
 permissions:
@@ -217,6 +221,9 @@ jobs:
           for f in $CHANGED_FILES; do
             if [ -f "$f" ]; then
               case "$f" in
+                .github/*)
+                  continue
+                  ;;
                 *.py|*.html|*.json|Dockerfile|requirements.txt)
                   TARGET_FILES="$TARGET_FILES $f"
                   ;;
@@ -245,6 +252,7 @@ jobs:
       # ----------------------------------------------------------------------
       - name: Update Code Mender CLI to Latest Version
         id: cm_update
+        if: steps.detect_changes.outputs.skip_scan != 'true'
         run: |
           echo "=== 4. Updating Code Mender CLI (cm update) ==="
           sudo cm update || cm update || true
