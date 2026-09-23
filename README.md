@@ -71,15 +71,11 @@ GCP-Security-release-update/
   * **`DEPRECATED` 항목**: 아티클 상단 `[DEPRECATED + Product_Name]` 바를 **Navy(`#0b1f44`)** 배경과 Amber 경고 배지로 강조합니다.
   * **최근 1주일(`recent_highlight_days: 7`) 이내 항목**: 아티클 상단 `[FEATURE/CHANGED + Product_Name]` 바를 **Rose-Amber 그라데이션**으로 강조합니다.
 
-### 2. 관리자 전용 콘솔 (`/admin`) 및 인증 구조
-* **접근 허용 계정**: 오직 **`dragon@jayseo.altostrat.com`** 계정만 접근할 수 있으며, `jayseo@google.com` 등 다른 계정은 `403 Forbidden`으로 차단됩니다.
-* **`/admin` 전용 인증 방식 (3가지 지원)**:
-  1. **Google Cloud Identity Platform (`security-demo-319501`) 비밀번호 로그인**: 등록된 관리자 비밀번호 검증 후 HMAC-SHA256 서명된 `HttpOnly` 세션 쿠키(`gcp_sec_admin_session`) 발급
-  2. **Google 이메일 원클릭 인증 링크 (Magic Link)**: `dragon@jayseo.altostrat.com` 메일함으로 Google Cloud Identity Platform이 직접 로그인 링크 및 비밀번호 재설정 메일 발송
-  3. **Google OAuth 2.0 / `gcloud` ID 토큰 검증**: `gcloud auth print-identity-token --account=dragon@jayseo.altostrat.com`으로 발급한 토큰을 Google `oauth2.googleapis.com/tokeninfo` 서버로 실시간 검증
-* **5대 관리자 메뉴**:
-  1. **관리자 설정**: 일일 자동 업데이트 활성화, 매일 자동 실행 시각(기본 `05:00`), 최근 강조 표시 기간(기본 `7`일) 설정
-  2. **제품 추가**: 신규 GCP 보안 제품 URL 등록 및 수집 활성화/비활성화 토글
+### 2. 관리자 콘솔 (`/admin`)
+* **관리자 기능**: 별도의 복잡한 로그인 절차 없이 관리자 콘솔(`/admin`)에 바로 접근하여 수집 대상 제품 및 스케줄러 설정을 제어할 수 있습니다.
+* **5대 관리 기능**:
+  1. **스케줄러 설정**: 일일 자동 업데이트 활성화, 매일 자동 실행 시각(기본 `05:00`), 최근 강조 표시 기간(기본 `7`일) 설정
+  2. **제품 관리**: 신규 GCP 보안 제품 URL 등록 및 수집 활성화/비활성화 토글
   3. **스냅샷 이후 신규 스캔**: 제품별/전체 즉시 스캔 실행 및 전체 DB 초기화 후 재스캔(`POST /api/reset-and-crawl`)
   4. **스냅샷 기준일 제어**: 제품별 기준일(`YYYY-MM-DD`) 변경 및 재스캔
   5. **최근 스냅샷 실행 이력**: 크롤링 실행 로그 및 신규/갱신 건수 조회
