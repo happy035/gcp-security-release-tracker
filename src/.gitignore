@@ -1,0 +1,8 @@
+
+# CodeMender enforced ignores
+node_modules
+node_modules/
+venv
+venv/
+.venv
+.venv/
