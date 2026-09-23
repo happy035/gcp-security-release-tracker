@@ -241,7 +241,18 @@ jobs:
           fi
 
       # ----------------------------------------------------------------------
-      # 4. 소스코드 취약점 스캔 (cm find - 증분 스캔)
+      # 4. Code Mender CLI 최신 버전 업데이트 (cm update - 항상 먼저 실행)
+      # ----------------------------------------------------------------------
+      - name: Update Code Mender CLI to Latest Version
+        id: cm_update
+        run: |
+          echo "=== 4. Updating Code Mender CLI (cm update) ==="
+          sudo cm update || cm update || true
+          echo "=== Current Code Mender CLI Version ==="
+          cm --version || cm -v
+
+      # ----------------------------------------------------------------------
+      # 5. 소스코드 취약점 스캔 (cm find - 증분 스캔)
       # ----------------------------------------------------------------------
       - name: Run Code Mender Scan (find)
         id: cm_scan
@@ -250,14 +261,14 @@ jobs:
           GOOGLE_APPLICATION_CREDENTIALS: /tmp/gcp_credentials.json
           TARGETS: ${{ steps.detect_changes.outputs.targets }}
         run: |
-          echo "=== 4. Running Code Mender Scan on modified targets ==="
+          echo "=== 5. Running Code Mender Scan on modified targets ==="
           for target in $TARGETS; do
             echo "--> Scanning target: $target"
             cm find "$target" -y --sandbox=false --bypass-warning
           done
 
       # ----------------------------------------------------------------------
-      # 5. 취약점 검증 (cm verify) 및 자동 패치 브랜치 생성 (cm fix)
+      # 6. 취약점 검증 (cm verify) 및 자동 패치 브랜치 생성 (cm fix)
       # ----------------------------------------------------------------------
       - name: Verify Findings & Create Fix Branches (Pre-PR stage)
         id: cm_verify_and_fix
@@ -275,7 +286,7 @@ jobs:
           import subprocess
           import sys
 
-          print("=== 5. Retrieving Findings Report ===")
+          print("=== 6. Retrieving Findings Report ===")
           report_proc = subprocess.run(["cm", "report", "-f", "json"], capture_output=True, text=True)
           if report_proc.returncode != 0:
               print(f"[ERROR] cm report failed (exit {report_proc.returncode}):\n{report_proc.stderr}", file=sys.stderr)
@@ -405,7 +416,7 @@ jobs:
           EOF
 
       # ----------------------------------------------------------------------
-      # 6. 실행 결과 상태 및 로그를 GCS에 백업/동기화 (러너 종료 전 상태 보존)
+      # 7. 실행 결과 상태 및 로그를 GCS에 백업/동기화 (러너 종료 전 상태 보존)
       # ----------------------------------------------------------------------
       - name: Backup Code Mender State & Logs to GCS
         if: always()
@@ -414,7 +425,7 @@ jobs:
           CLEAN_BUCKET=$(echo "$RAW_BUCKET" | sed -e 's|^gs://||' -e 's|/*$||')
           GCS_TARGET_DIR="${GCS_CONFIG_DIR:-codemender-config}"
 
-          echo "=== 6. Code Mender State Backup ==="
+          echo "=== 7. Code Mender State Backup ==="
           echo "Configured GCS_BUCKET: '$RAW_BUCKET'"
           echo "Cleaned Bucket Name:   '$CLEAN_BUCKET'"
           echo "Target Directory:      '$GCS_TARGET_DIR'"
