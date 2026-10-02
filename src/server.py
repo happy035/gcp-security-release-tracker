@@ -1,9 +1,12 @@
+import base64
 import json
 import os
 import re
+import secrets
 import threading
 import time
 from datetime import datetime, timedelta
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -19,6 +22,31 @@ except ImportError:
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 INDEX_TEMPLATE_PATH = TEMPLATE_DIR / "index.html"
 ADMIN_TEMPLATE_PATH = TEMPLATE_DIR / "admin.html"
+
+DEFAULT_ADMIN_EMAILS: List[str] = ["dragon@jayseo.altostrat.com"]
+
+
+def get_allowed_admins() -> List[str]:
+    raw = os.environ.get("ADMIN_EMAILS") or os.environ.get("ADMIN_USERS") or ""
+    env_admins = [e.strip().lower() for e in raw.split(",") if e.strip()]
+    admins = list(DEFAULT_ADMIN_EMAILS)
+    for a in env_admins:
+        if a not in admins:
+            admins.append(a)
+    return admins
+
+
+def decode_jwt_payload_unverified(token: str) -> Dict[str, Any]:
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return {}
+        payload_segment = parts[1]
+        padded = payload_segment + "=" * (-len(payload_segment) % 4)
+        raw = base64.urlsafe_b64decode(padded)
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return {}
 
 
 def compute_next_scheduled_run(update_time_str: str, enabled: bool) -> str:
@@ -95,12 +123,163 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
     bootstrap_lock: threading.Lock = threading.Lock()
     bootstrap_done_event: threading.Event = threading.Event()
     is_bootstrapping: bool = False
+    active_sessions: Dict[str, Dict[str, Any]] = {}
+    configured_admin_token: Optional[str] = None
 
     def _wait_if_bootstrapping(self, timeout: float = 25.0) -> bool:
         """If an initial empty-DB bootstrap is currently running, wait for it; never trigger a crawl on GET."""
         if self.is_bootstrapping and not self.bootstrap_done_event.is_set():
             self.bootstrap_done_event.wait(timeout=timeout)
         return self.is_bootstrapping
+
+    def _get_current_user(self) -> Dict[str, Any]:
+        allowed_admins = get_allowed_admins()
+
+        # 1. Identity-Aware Proxy (IAP) headers
+        raw_iap_email = (
+            self.headers.get("X-Goog-Authenticated-User-Email")
+            or self.headers.get("x-goog-authenticated-user-email")
+            or ""
+        ).strip()
+        raw_jwt = (
+            self.headers.get("X-Goog-IAP-JWT-Assertion")
+            or self.headers.get("x-goog-iap-jwt-assertion")
+            or ""
+        ).strip()
+
+        jwt_email = ""
+        if raw_jwt:
+            payload = decode_jwt_payload_unverified(raw_jwt)
+            exp = payload.get("exp")
+            if exp is None or not isinstance(exp, (int, float)) or time.time() <= exp:
+                jwt_email = str(payload.get("email") or "").strip().lower()
+
+        iap_email = ""
+        if raw_iap_email:
+            if ":" in raw_iap_email:
+                iap_email = raw_iap_email.split(":")[-1].strip().lower()
+            else:
+                iap_email = raw_iap_email.strip().lower()
+
+        if raw_jwt and raw_iap_email and jwt_email and iap_email:
+            if jwt_email != iap_email:
+                return {
+                    "email": "",
+                    "is_admin": False,
+                    "is_viewer": False,
+                    "auth_source": "invalid",
+                    "authenticated": False,
+                }
+
+        effective_iap_email = iap_email or jwt_email
+        if effective_iap_email:
+            is_admin = effective_iap_email in allowed_admins
+            return {
+                "email": effective_iap_email,
+                "is_admin": is_admin,
+                "is_viewer": True,
+                "auth_source": "gcp_iap",
+                "authenticated": True,
+            }
+
+        # 2. Authorization Header (Bearer token) or API Key headers
+        auth_header = (self.headers.get("Authorization") or "").strip()
+        admin_token_header = (
+            self.headers.get("X-Admin-Token")
+            or self.headers.get("X-API-Key")
+            or ""
+        ).strip()
+
+        token = ""
+        if auth_header:
+            if auth_header.lower().startswith("bearer "):
+                token = auth_header[7:].strip()
+            else:
+                token = auth_header
+        elif admin_token_header:
+            token = admin_token_header
+
+        # 3. Cookie
+        cookie_header = self.headers.get("Cookie", "")
+        if not token and cookie_header:
+            cookies = SimpleCookie()
+            try:
+                cookies.load(cookie_header)
+                if "admin_token" in cookies:
+                    token = cookies["admin_token"].value
+                elif "session_token" in cookies:
+                    token = cookies["session_token"].value
+            except Exception:
+                pass
+
+        # 4. Query Parameter fallback
+        if not token:
+            parsed = urlparse(self.path)
+            qs = parse_qs(parsed.query)
+            token_candidates = (
+                qs.get("admin_token", [])
+                + qs.get("token", [])
+                + qs.get("api_key", [])
+            )
+            if token_candidates:
+                token = token_candidates[0].strip()
+
+        configured_token = (
+            os.environ.get("ADMIN_TOKEN")
+            or os.environ.get("ADMIN_API_KEY")
+            or self.configured_admin_token
+        )
+        if configured_token:
+            configured_token = configured_token.strip()
+
+        if token and configured_token and token == configured_token:
+            admin_email = os.environ.get(
+                "ADMIN_EMAIL", allowed_admins[0] if allowed_admins else "admin@domain.com"
+            )
+            return {
+                "email": admin_email,
+                "is_admin": True,
+                "is_viewer": True,
+                "auth_source": "token",
+                "authenticated": True,
+            }
+
+        cls = self.__class__
+        if token and hasattr(cls, "active_sessions") and token in cls.active_sessions:
+            sess = cls.active_sessions[token]
+            return {
+                "email": sess.get("email", allowed_admins[0]),
+                "is_admin": sess.get("is_admin", True),
+                "is_viewer": True,
+                "auth_source": "session",
+                "authenticated": True,
+            }
+
+        return {
+            "email": "",
+            "is_admin": False,
+            "is_viewer": True,
+            "auth_source": "none",
+            "authenticated": False,
+        }
+
+    def _require_admin(self) -> Optional[Dict[str, Any]]:
+        """Verify caller has admin privileges. If not, send error response and return None."""
+        user = self._get_current_user()
+        if not user.get("authenticated", False):
+            self._send_json(
+                {"error": "Unauthorized: Authentication required for this operation."},
+                status=401,
+                extra_headers=[("WWW-Authenticate", 'Bearer realm="GCP Security Release Tracker"')],
+            )
+            return None
+        if not user.get("is_admin", False):
+            self._send_json(
+                {"error": "Forbidden: Administrative privileges required."},
+                status=403,
+            )
+            return None
+        return user
 
     def _send_json(
         self,
@@ -168,28 +347,63 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
                 self._send_html("<h1>Template not found</h1>", status=404)
             return
 
-        # 2. Admin Console: Accessible directly without authentication
+        # 2. Admin Console: Accessible only with admin authentication
         if path in ("/admin", "/admin/"):
+            user = self._get_current_user()
+            if not user.get("authenticated", False):
+                self._send_html(
+                    "<!DOCTYPE html><html><head><title>401 Unauthorized</title></head>"
+                    "<body style='font-family:sans-serif;padding:40px;text-align:center;'>"
+                    "<h1>401 Unauthorized</h1><p>Admin authentication required to access the Admin Console.</p>"
+                    "<p><a href='/'>Return to Main Dashboard</a></p></body></html>",
+                    status=401,
+                    extra_headers=[("WWW-Authenticate", 'Bearer realm="GCP Security Release Tracker"')],
+                )
+                return
+            if not user.get("is_admin", False):
+                self._send_html(
+                    "<!DOCTYPE html><html><head><title>403 Forbidden</title></head>"
+                    "<body style='font-family:sans-serif;padding:40px;text-align:center;'>"
+                    "<h1>403 Forbidden</h1><p>Access denied. Administrative privileges required.</p>"
+                    "<p><a href='/'>Return to Main Dashboard</a></p></body></html>",
+                    status=403,
+                )
+                return
+
             if ADMIN_TEMPLATE_PATH.exists():
-                self._send_html(ADMIN_TEMPLATE_PATH.read_text(encoding="utf-8"))
+                extra_headers = []
+                token_param = (
+                    qs.get("admin_token", [None])[0]
+                    or qs.get("token", [None])[0]
+                    or qs.get("api_key", [None])[0]
+                )
+                if token_param:
+                    extra_headers.append(
+                        ("Set-Cookie", f"admin_token={token_param}; Path=/; HttpOnly; SameSite=Lax")
+                    )
+                self._send_html(
+                    ADMIN_TEMPLATE_PATH.read_text(encoding="utf-8"),
+                    extra_headers=extra_headers if extra_headers else None,
+                )
             else:
                 self._send_html("<h1>Admin template not found</h1>", status=404)
             return
 
         # 3. User metadata endpoint
         if path == "/api/me":
+            user = self._get_current_user()
             self._send_json(
                 {
-                    "email": "public_user",
-                    "is_admin": True,
-                    "is_viewer": True,
-                    "auth_source": "open_access",
-                    "allowed_admins": ["public_user"],
+                    "email": user.get("email", ""),
+                    "is_admin": user.get("is_admin", False),
+                    "is_viewer": user.get("is_viewer", True),
+                    "auth_source": user.get("auth_source", "none"),
+                    "allowed_admins": get_allowed_admins(),
                 }
             )
             return
 
-        # 4. Settings
+        # 4. Settings (read-only for dashboard)
         if path == "/api/settings":
             self._send_json({"settings": self._build_settings_response()})
             return
@@ -239,8 +453,25 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
 
         # 8. Logout fallback
         if path == "/api/auth/logout":
+            cookie_header = self.headers.get("Cookie", "")
+            if cookie_header:
+                cookies = SimpleCookie()
+                try:
+                    cookies.load(cookie_header)
+                    if "session_token" in cookies:
+                        self.__class__.active_sessions.pop(cookies["session_token"].value, None)
+                except Exception:
+                    pass
             self.send_response(302)
             self.send_header("Location", "/")
+            self.send_header(
+                "Set-Cookie",
+                "session_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax",
+            )
+            self.send_header(
+                "Set-Cookie",
+                "admin_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax",
+            )
             self.end_headers()
             return
 
@@ -252,11 +483,56 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
 
         # Logout
         if path == "/api/auth/logout":
-            self._send_json({"message": "로그아웃되었습니다."})
+            cookie_header = self.headers.get("Cookie", "")
+            if cookie_header:
+                cookies = SimpleCookie()
+                try:
+                    cookies.load(cookie_header)
+                    if "session_token" in cookies:
+                        self.__class__.active_sessions.pop(cookies["session_token"].value, None)
+                except Exception:
+                    pass
+            extra_headers = [
+                ("Set-Cookie", "session_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax"),
+                ("Set-Cookie", "admin_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax"),
+            ]
+            self._send_json({"message": "로그아웃되었습니다."}, extra_headers=extra_headers)
+            return
+
+        # Login
+        if path == "/api/auth/login":
+            body = self._read_json_body()
+            token = (body.get("token") or body.get("api_key") or "").strip()
+            configured_token = (
+                os.environ.get("ADMIN_TOKEN")
+                or os.environ.get("ADMIN_API_KEY")
+                or self.configured_admin_token
+            )
+            if configured_token and token == configured_token.strip():
+                session_id = secrets.token_hex(24)
+                cls = self.__class__
+                allowed = get_allowed_admins()
+                admin_email = os.environ.get("ADMIN_EMAIL", allowed[0] if allowed else "admin@domain.com")
+                cls.active_sessions[session_id] = {
+                    "email": admin_email,
+                    "is_admin": True,
+                    "auth_source": "session",
+                }
+                extra_headers = [
+                    ("Set-Cookie", f"session_token={session_id}; Path=/; HttpOnly; SameSite=Lax")
+                ]
+                self._send_json(
+                    {"status": "OK", "session_token": session_id, "email": admin_email},
+                    extra_headers=extra_headers,
+                )
+                return
+            self._send_json({"error": "Invalid credentials"}, status=401)
             return
 
         # DB Reset and Crawl
         if path == "/api/reset-and-crawl":
+            if not self._require_admin():
+                return
             cls = self.__class__
             with cls.bootstrap_lock:
                 cls.is_bootstrapping = True
@@ -282,6 +558,8 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
 
         # Crawl
         if path == "/api/crawl":
+            if not self._require_admin():
+                return
             product_slug = body.get("product_slug")
             override_date = body.get("override_baseline_date")
             include_same_day = bool(body.get("include_same_day", False))
@@ -302,6 +580,8 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
 
         # Add or update product
         if path == "/api/products":
+            if not self._require_admin():
+                return
             slug = (body.get("slug") or "").strip().lower()
             name = (body.get("name") or "").strip()
             url = (body.get("release_notes_url") or "").strip()
@@ -343,10 +623,12 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
-        body = self._read_json_body()
 
         # Settings update
         if path == "/api/settings":
+            if not self._require_admin():
+                return
+            body = self._read_json_body()
             auto_update_enabled = body.get("auto_update_enabled")
             auto_update_time = body.get("auto_update_time")
             recent_highlight_days = body.get("recent_highlight_days")
@@ -371,6 +653,9 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
         # Snapshot date update
         m = re.match(r"^/api/products/([^/]+)/snapshot$", path)
         if m:
+            if not self._require_admin():
+                return
+            body = self._read_json_body()
             slug = m.group(1)
             snapshot_date = (body.get("snapshot_date") or "").strip()
             clear_after_date = bool(body.get("clear_after_date", False))
