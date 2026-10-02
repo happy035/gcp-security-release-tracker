@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import re
@@ -317,6 +318,20 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if not re.match(r"^[a-z0-9_-]+$", slug):
+                self._send_json(
+                    {"error": "유효하지 않은 slug 형식입니다."},
+                    status=400,
+                )
+                return
+
+            if not re.match(r"^\d{4}-\d{2}-\d{2}$", snapshot_date):
+                self._send_json(
+                    {"error": "snapshot_date는 YYYY-MM-DD 형식이어야 합니다."},
+                    status=400,
+                )
+                return
+
             try:
                 validate_release_notes_url(url)
             except ValueError as exc:
@@ -325,6 +340,10 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
                     status=400,
                 )
                 return
+
+            name = html.escape(name)
+            category = html.escape(category)
+            description = html.escape(description)
 
             product = self.db.upsert_product(
                 slug=slug,
@@ -376,8 +395,8 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
             clear_after_date = bool(body.get("clear_after_date", False))
             enabled = body.get("enabled")
 
-            if not snapshot_date:
-                self._send_json({"error": "snapshot_date is required"}, status=400)
+            if not snapshot_date or not re.match(r"^\d{4}-\d{2}-\d{2}$", snapshot_date):
+                self._send_json({"error": "snapshot_date is required (YYYY-MM-DD)"}, status=400)
                 return
 
             updated = self.db.update_product_snapshot(
