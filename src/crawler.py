@@ -1,20 +1,105 @@
 import hashlib
 import html
+import ipaddress
 import re
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 
-from src.database import ReleaseDatabase
+try:
+    from src.database import ReleaseDatabase
+except ImportError:
+    from database import ReleaseDatabase
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 )
+
+ALLOWED_SCHEMES = {"https"}
+ALLOWED_DOMAINS = {
+    "cloud.google.com",
+    "docs.cloud.google.com",
+    "cloud.google",
+    "docs.cloud.google",
+}
+
+
+def is_safe_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Check that the IP address does not belong to private, loopback, link-local, or reserved ranges."""
+    if (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+        or not ip.is_global
+    ):
+        return False
+    return True
+
+
+def validate_release_notes_url(url: str) -> None:
+    """
+    Validate that release_notes_url uses HTTPS, targets an allowed Google Cloud domain,
+    and resolves to safe, public IP addresses to protect against SSRF.
+    """
+    if not url or not isinstance(url, str):
+        raise ValueError("URL must be a non-empty string")
+
+    parsed = urlparse(url.strip())
+    if parsed.scheme.lower() not in ALLOWED_SCHEMES:
+        raise ValueError(f"Invalid URL scheme '{parsed.scheme}'. Only HTTPS is allowed.")
+
+    hostname = (parsed.hostname or "").strip().lower()
+    if not hostname:
+        raise ValueError("URL must include a valid hostname")
+
+    if parsed.username or parsed.password:
+        raise ValueError("URLs containing authentication credentials are not allowed")
+
+    if parsed.port and parsed.port != 443:
+        raise ValueError(f"Port {parsed.port} is not allowed. Only HTTPS port 443 is permitted.")
+
+    is_domain_allowed = (
+        hostname in ALLOWED_DOMAINS
+        or hostname == "google.com"
+        or hostname.endswith(".google.com")
+        or hostname == "cloud.google"
+        or hostname.endswith(".cloud.google")
+    )
+    if not is_domain_allowed:
+        raise ValueError(
+            f"Disallowed domain '{hostname}'. Only Google Cloud documentation domains are permitted."
+        )
+
+    try:
+        addr_info = socket.getaddrinfo(hostname, 443, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as e:
+        raise ValueError(f"Could not resolve host '{hostname}': {e}")
+
+    if not addr_info:
+        raise ValueError(f"Could not resolve host '{hostname}'")
+
+    for entry in addr_info:
+        sockaddr = entry[4]
+        ip_str = sockaddr[0]
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+        except ValueError:
+            raise ValueError(f"Invalid IP address resolved: {ip_str}")
+
+        if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped:
+            ip_obj = ip_obj.ipv4_mapped
+
+        if not is_safe_ip(ip_obj):
+            raise ValueError(f"Access to private/internal IP address '{ip_str}' is blocked")
 
 DATE_FORMATS = [
     "%B %d, %Y",   # September 16, 2026
@@ -280,13 +365,25 @@ class GCPSecurityReleaseCrawler:
         self.db = db or ReleaseDatabase()
 
     def fetch_html(self, url: str, timeout: int = 25) -> str:
-        resp = requests.get(
-            url,
-            headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        return resp.text
+        current_url = url
+        max_redirects = 5
+        for _ in range(max_redirects):
+            validate_release_notes_url(current_url)
+            resp = requests.get(
+                current_url,
+                headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
+                timeout=timeout,
+                allow_redirects=False,
+            )
+            if resp.is_redirect or resp.status_code in (301, 302, 303, 307, 308):
+                location = resp.headers.get("Location")
+                if not location:
+                    raise ValueError(f"Redirect response missing Location header from {current_url}")
+                current_url = urljoin(current_url, location)
+                continue
+            resp.raise_for_status()
+            return resp.text
+        raise ValueError(f"Too many redirects from {url}")
 
     def crawl_product(
         self,
