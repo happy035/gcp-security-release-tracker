@@ -520,6 +520,25 @@
       return ADMIN_I18N[currentLang] || ADMIN_I18N.en;
     }
 
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function sanitizeUrl(url) {
+      if (!url) return '#';
+      const clean = String(url).trim();
+      if (/^https?:\/\//i.test(clean)) {
+        return escapeHtml(clean);
+      }
+      return '#';
+    }
+
     function setLanguage(lang) {
       if (lang !== 'en' && lang !== 'ko') return;
       currentLang = lang;
@@ -721,17 +740,17 @@
       const prevCtrlVal = ctrlSel.value;
       const prevHistVal = histSel.value || 'all';
 
-      scanSel.innerHTML = `<option value="all">${dict.scanAllOption}</option>` +
-        productsCache.map(p => `<option value="${p.slug}">${p.name} (${p.slug})</option>`).join('');
+      scanSel.innerHTML = `<option value="all">${escapeHtml(dict.scanAllOption)}</option>` +
+        productsCache.map(p => `<option value="${escapeHtml(p.slug)}">${escapeHtml(p.name)} (${escapeHtml(p.slug)})</option>`).join('');
       scanSel.value = prevScanVal;
 
-      ctrlSel.innerHTML = productsCache.map(p => `<option value="${p.slug}">${p.name} (${p.slug})</option>`).join('');
+      ctrlSel.innerHTML = productsCache.map(p => `<option value="${escapeHtml(p.slug)}">${escapeHtml(p.name)} (${escapeHtml(p.slug)})</option>`).join('');
       if (prevCtrlVal && productsCache.some(p => p.slug === prevCtrlVal)) {
         ctrlSel.value = prevCtrlVal;
       }
 
-      histSel.innerHTML = `<option value="all">${dict.historyAllOption}</option>` +
-        productsCache.map(p => `<option value="${p.slug}">${p.name}</option>`).join('');
+      histSel.innerHTML = `<option value="all">${escapeHtml(dict.historyAllOption)}</option>` +
+        productsCache.map(p => `<option value="${escapeHtml(p.slug)}">${escapeHtml(p.name)}</option>`).join('');
       histSel.value = prevHistVal;
 
       onControlProductChange();
@@ -745,24 +764,24 @@
             </span>
           </td>
           <td class="py-3 px-4">
-            <div class="font-semibold text-slate-900">${p.name}</div>
-            <div class="text-[11px] text-slate-400">${p.slug} · <a href="${p.release_notes_url}" target="_blank" class="text-blue-600 hover:underline">${dict.sourceLink}</a></div>
+            <div class="font-semibold text-slate-900">${escapeHtml(p.name)}</div>
+            <div class="text-[11px] text-slate-400">${escapeHtml(p.slug)} · <a href="${sanitizeUrl(p.release_notes_url)}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">${escapeHtml(dict.sourceLink)}</a></div>
           </td>
-          <td class="py-3 px-4 font-mono font-semibold text-blue-700">${p.snapshot_date}</td>
-          <td class="py-3 px-4 font-mono text-slate-700">${p.latest_release_date || '-'}</td>
+          <td class="py-3 px-4 font-mono font-semibold text-blue-700">${escapeHtml(p.snapshot_date)}</td>
+          <td class="py-3 px-4 font-mono text-slate-700">${escapeHtml(p.latest_release_date || '-')}</td>
           <td class="py-3 px-4">
-            <span class="font-bold text-slate-900">${dict.itemsUnit(p.total_releases || 0)}</span>
-            <span class="text-xs text-emerald-600 ml-1">(Feature ${p.feature_count || 0})</span>
+            <span class="font-bold text-slate-900">${escapeHtml(dict.itemsUnit(p.total_releases || 0))}</span>
+            <span class="text-xs text-emerald-600 ml-1">(Feature ${Number(p.feature_count) || 0})</span>
           </td>
-          <td class="py-3 px-4 text-xs text-slate-500">${(p.last_crawled_at || '-').replace('T', ' ').replace('Z', '')}</td>
+          <td class="py-3 px-4 text-xs text-slate-500">${escapeHtml((p.last_crawled_at || '-').replace('T', ' ').replace('Z', ''))}</td>
           <td class="py-3 px-4 text-right space-x-1">
-            <button onclick="selectProductForControl('${p.slug}')"
+            <button data-slug="${escapeHtml(p.slug)}" onclick="selectProductForControl(this.dataset.slug)"
               class="px-2.5 py-1 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition">
-              ${dict.btnSelectBaseline}
+              ${escapeHtml(dict.btnSelectBaseline)}
             </button>
-            <button onclick="triggerSingleProductCrawl('${p.slug}')"
+            <button data-slug="${escapeHtml(p.slug)}" onclick="triggerSingleProductCrawl(this.dataset.slug)"
               class="px-2.5 py-1 text-xs font-semibold bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg transition">
-              ${dict.btnScanNow}
+              ${escapeHtml(dict.btnScanNow)}
             </button>
           </td>
         </tr>
@@ -793,7 +812,7 @@
 
       if (!slug || !newDate) return;
 
-      const res = await fetch(`/api/products/${slug}/snapshot`, {
+      const res = await fetch(`/api/products/${encodeURIComponent(slug)}/snapshot`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -901,7 +920,7 @@
 
     async function loadAdminSnapshots() {
       const productSlug = document.getElementById('historyFilterProduct').value || 'all';
-      const res = await fetch(`/api/snapshots?product=${productSlug}`, { cache: 'no-store' });
+      const res = await fetch(`/api/snapshots?product=${encodeURIComponent(productSlug)}`, { cache: 'no-store' });
       const data = await res.json();
       snapshotsCache = data.snapshots || [];
       renderAdminSnapshotsUI();
@@ -914,7 +933,7 @@
       if (snapshotsCache.length === 0) {
         tbody.innerHTML = `
           <tr>
-            <td colspan="7" class="py-8 text-center text-slate-400">${dict.emptySnapshots}</td>
+            <td colspan="7" class="py-8 text-center text-slate-400">${escapeHtml(dict.emptySnapshots)}</td>
           </tr>
         `;
         return;
@@ -922,23 +941,23 @@
 
       tbody.innerHTML = snapshotsCache.map(s => `
         <tr class="hover:bg-slate-50">
-          <td class="py-3 px-4 font-mono text-xs text-slate-400">#${s.id}</td>
+          <td class="py-3 px-4 font-mono text-xs text-slate-400">#${Number(s.id) || 0}</td>
           <td class="py-3 px-4">
             <span class="px-2 py-0.5 text-[11px] font-bold rounded ${s.status === 'SUCCESS' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}">
-              ${s.status}
+              ${escapeHtml(s.status)}
             </span>
           </td>
-          <td class="py-3 px-4 font-semibold text-slate-800">${s.product_name}</td>
+          <td class="py-3 px-4 font-semibold text-slate-800">${escapeHtml(s.product_name)}</td>
           <td class="py-3 px-4 font-mono text-xs">
-            <span class="text-slate-600">${s.baseline_date}</span>
+            <span class="text-slate-600">${escapeHtml(s.baseline_date)}</span>
             <span class="text-slate-400 mx-1">→</span>
-            <strong class="text-blue-700">${s.new_snapshot_date}</strong>
+            <strong class="text-blue-700">${escapeHtml(s.new_snapshot_date)}</strong>
           </td>
           <td class="py-3 px-4 text-xs">
-            ${dict.histStatsCell(s.scanned_count, s.inserted_count, s.updated_count)}
+            ${dict.histStatsCell(Number(s.scanned_count) || 0, Number(s.inserted_count) || 0, Number(s.updated_count) || 0)}
           </td>
-          <td class="py-3 px-4 font-mono text-xs text-slate-500">${(s.crawled_at || '').replace('T', ' ').replace('Z', '')}</td>
-          <td class="py-3 px-4 text-xs text-slate-500 max-w-xs truncate" title="${s.message || ''}">${s.message || '-'}</td>
+          <td class="py-3 px-4 font-mono text-xs text-slate-500">${escapeHtml((s.crawled_at || '').replace('T', ' ').replace('Z', ''))}</td>
+          <td class="py-3 px-4 text-xs text-slate-500 max-w-xs truncate" title="${escapeHtml(s.message || '')}">${escapeHtml(s.message || '-')}</td>
         </tr>
       `).join('');
     }
