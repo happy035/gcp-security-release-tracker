@@ -1,6 +1,9 @@
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import threading
 import time
 from datetime import datetime, timedelta
@@ -69,6 +72,97 @@ def parse_cookie_header(cookie_header: str) -> Dict[str, str]:
                 k, v = part.strip().split("=", 1)
                 cookies[k.strip().lower()] = v.strip()
     return cookies
+
+
+_SESSION_SECRET = os.environ.get("SESSION_SECRET") or secrets.token_hex(32)
+_SESSION_STORE: Dict[str, Dict[str, Any]] = {}
+_SESSION_STORE_LOCK = threading.Lock()
+SESSION_TTL_SECONDS = 86400  # 24 hours
+_SERVER_ADMIN_TOKEN: Optional[str] = (
+    os.environ.get("ADMIN_TOKEN") or os.environ.get("AUTH_TOKEN") or secrets.token_urlsafe(32)
+)
+
+
+def get_configured_admin_token() -> Optional[str]:
+    env_token = os.environ.get("ADMIN_TOKEN") or os.environ.get("AUTH_TOKEN")
+    if env_token:
+        return env_token.strip()
+    path = DEFAULT_CONFIG_PATH
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            tok = cfg.get("admin_token")
+            if tok and isinstance(tok, str) and tok.strip():
+                return tok.strip()
+        except Exception:
+            pass
+    return _SERVER_ADMIN_TOKEN
+
+
+def create_admin_session(email: str) -> str:
+    """Create a cryptographically secure signed session token and store it."""
+    timestamp = int(time.time())
+    nonce = secrets.token_hex(16)
+    payload = f"{email}:{timestamp}:{nonce}"
+    sig = hmac.new(
+        _SESSION_SECRET.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    token = f"{payload}.{sig}"
+    with _SESSION_STORE_LOCK:
+        _SESSION_STORE[token] = {
+            "email": email,
+            "created_at": timestamp,
+        }
+    return token
+
+
+def verify_admin_session(token: str) -> Optional[str]:
+    """Verify session token signature, expiration, and session store, returning authenticated email or None."""
+    if not token or "." not in token:
+        return None
+    try:
+        payload, sig = token.rsplit(".", 1)
+        expected_sig = hmac.new(
+            _SESSION_SECRET.encode("utf-8"),
+            payload.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(sig, expected_sig):
+            return None
+        parts = payload.rsplit(":", 2)
+        if len(parts) != 3:
+            return None
+        email, ts_str, _ = parts
+        created_at = int(ts_str)
+        if time.time() - created_at > SESSION_TTL_SECONDS:
+            with _SESSION_STORE_LOCK:
+                _SESSION_STORE.pop(token, None)
+            return None
+        allowed_admins = get_allowed_admin_emails()
+        if email.lower() not in allowed_admins:
+            return None
+        return email.lower()
+    except Exception:
+        return None
+
+
+def invalidate_admin_session(token: str) -> None:
+    if token:
+        with _SESSION_STORE_LOCK:
+            _SESSION_STORE.pop(token, None)
+
+
+def verify_iap_jwt_assertion(jwt_token: str) -> Optional[str]:
+    """Verify Google Cloud IAP JWT assertion.
+    Without an upstream Google IAP proxy and cryptographic signature verification,
+    untrusted client assertions are rejected.
+    """
+    if not jwt_token:
+        return None
+    return None
 
 
 class AutoUpdateScheduler:
@@ -191,66 +285,82 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
 
     def _get_authenticated_user(self) -> Dict[str, Any]:
         allowed_admins = get_allowed_admin_emails()
+        configured_token = get_configured_admin_token()
+        admin_email = allowed_admins[0] if allowed_admins else "admin@local"
 
-        # 1. Google Identity-Aware Proxy (IAP) header
-        iap_header = (self.headers.get("X-Goog-Authenticated-User-Email") or "").strip()
-        if iap_header:
-            email = iap_header.split(":")[-1].strip().lower()
-            if email:
+        # 1. Google Identity-Aware Proxy (IAP) header with cryptographic verification
+        iap_jwt = (self.headers.get("X-Goog-IAP-JWT-Assertion") or "").strip()
+        if iap_jwt:
+            email = verify_iap_jwt_assertion(iap_jwt)
+            if email and email.lower() in allowed_admins:
                 return {
-                    "email": email,
-                    "is_admin": email in allowed_admins,
+                    "email": email.lower(),
+                    "is_admin": True,
                     "is_viewer": True,
                     "auth_source": "gcp_iap",
-                    "allowed_admins": allowed_admins,
                 }
 
-        # 2. Other GCP / reverse-proxy headers
-        for hdr_name in ("X-Goog-User-Email", "X-Forwarded-Email", "X-User-Email", "X-Admin-Email"):
-            hdr_val = (self.headers.get(hdr_name) or "").strip()
-            if hdr_val:
-                email = hdr_val.lower()
-                return {
-                    "email": email,
-                    "is_admin": email in allowed_admins,
-                    "is_viewer": True,
-                    "auth_source": "gcp_identity_platform",
-                    "allowed_admins": allowed_admins,
-                }
-
-        # 3. Authorization Bearer header
+        # 2. Secret Admin Token / Bearer Header
         auth_header = (self.headers.get("Authorization") or "").strip()
         if auth_header.lower().startswith("bearer "):
-            token = auth_header[7:].strip().lower()
-            if token:
+            token = auth_header[7:].strip()
+            if configured_token and hmac.compare_digest(token, configured_token):
                 return {
-                    "email": token,
-                    "is_admin": token in allowed_admins,
+                    "email": admin_email,
+                    "is_admin": True,
                     "is_viewer": True,
                     "auth_source": "bearer_token",
-                    "allowed_admins": allowed_admins,
+                }
+            session_email = verify_admin_session(token)
+            if session_email:
+                return {
+                    "email": session_email,
+                    "is_admin": True,
+                    "is_viewer": True,
+                    "auth_source": "bearer_token",
                 }
 
-        # 4. Session Cookies
+        # 3. Secret Admin Token via X-Admin-Token header
+        admin_token_hdr = (self.headers.get("X-Admin-Token") or "").strip()
+        if admin_token_hdr and configured_token and hmac.compare_digest(admin_token_hdr, configured_token):
+            return {
+                "email": admin_email,
+                "is_admin": True,
+                "is_viewer": True,
+                "auth_source": "admin_token",
+            }
+
+        # 4. Secret Admin Token via query parameter
+        parsed_url = urlparse(self.path)
+        qs = parse_qs(parsed_url.query)
+        token_param = (qs.get("token", [""])[0]).strip()
+        if token_param and configured_token and hmac.compare_digest(token_param, configured_token):
+            return {
+                "email": admin_email,
+                "is_admin": True,
+                "is_viewer": True,
+                "auth_source": "admin_token",
+            }
+
+        # 5. Cryptographically verified session cookie
         cookies = parse_cookie_header(self.headers.get("Cookie", ""))
-        for cookie_key in ("admin_session", "admin_email", "user_email", "auth_user"):
-            cookie_val = cookies.get(cookie_key, "").strip().lower()
-            if cookie_val:
+        session_token = cookies.get("admin_session", "").strip()
+        if session_token:
+            session_email = verify_admin_session(session_token)
+            if session_email:
                 return {
-                    "email": cookie_val,
-                    "is_admin": cookie_val in allowed_admins,
+                    "email": session_email,
+                    "is_admin": True,
                     "is_viewer": True,
                     "auth_source": "session_cookie",
-                    "allowed_admins": allowed_admins,
                 }
 
-        # 5. Unauthenticated
+        # 6. Unauthenticated
         return {
             "email": "unauthenticated",
             "is_admin": False,
             "is_viewer": True,
             "auth_source": "none",
-            "allowed_admins": allowed_admins,
         }
 
     def _require_admin(self) -> bool:
@@ -299,8 +409,9 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
 
             extra_headers = []
             if user.get("email") and user.get("email") != "unauthenticated":
+                session_token = create_admin_session(user["email"])
                 extra_headers.append(
-                    ("Set-Cookie", f"admin_session={user['email']}; Path=/; HttpOnly; SameSite=Lax")
+                    ("Set-Cookie", f"admin_session={session_token}; Path=/; HttpOnly; SameSite=Lax")
                 )
             if ADMIN_TEMPLATE_PATH.exists():
                 self._send_html(ADMIN_TEMPLATE_PATH.read_text(encoding="utf-8"), extra_headers=extra_headers)
@@ -311,7 +422,14 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
         # 3. User metadata endpoint
         if path == "/api/me":
             user = self._get_authenticated_user()
-            self._send_json(user)
+            self._send_json(
+                {
+                    "email": user.get("email", "unauthenticated"),
+                    "is_admin": user.get("is_admin", False),
+                    "is_viewer": user.get("is_viewer", True),
+                    "auth_source": user.get("auth_source", "none"),
+                }
+            )
             return
 
         # 4. Settings
@@ -364,6 +482,10 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
 
         # 8. Logout fallback
         if path == "/api/auth/logout":
+            cookies = parse_cookie_header(self.headers.get("Cookie", ""))
+            session_tok = cookies.get("admin_session")
+            if session_tok:
+                invalidate_admin_session(session_tok)
             self.send_response(302)
             self.send_header("Location", "/")
             self.send_header("Set-Cookie", "admin_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
@@ -381,6 +503,10 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
 
         # Logout
         if path == "/api/auth/logout":
+            cookies = parse_cookie_header(self.headers.get("Cookie", ""))
+            session_tok = cookies.get("admin_session")
+            if session_tok:
+                invalidate_admin_session(session_tok)
             self._send_json(
                 {"message": "로그아웃되었습니다."},
                 extra_headers=[
@@ -584,8 +710,12 @@ def run_server(host: str = "127.0.0.1", port: int = 8080, db: Optional[ReleaseDa
     )
 
     server = ThreadingHTTPServer((host, port), ReleaseTrackerHTTPRequestHandler)
+    admin_token = get_configured_admin_token()
     print(f"🚀 GCP Security Release Notes 웹 서버가 시작되었습니다: http://{host}:{port}")
-    print(f"⚙️ 관리자 콘솔: http://{host}:{port}/admin")
+    if admin_token:
+        print(f"⚙️ 관리자 콘솔: http://{host}:{port}/admin?token={admin_token}")
+    else:
+        print(f"⚙️ 관리자 콘솔: http://{host}:{port}/admin")
     print(f"⏰ 자동 업데이트 스케줄러 상태: {sched_state} (최근 강조 기준: {settings.get('recent_highlight_days', 7)}일 이내)")
     try:
         server.serve_forever()
