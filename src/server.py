@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-from src.crawler import GCPSecurityReleaseCrawler
+from src.crawler import GCPSecurityReleaseCrawler, validate_release_notes_url
 from src.database import DEFAULT_CONFIG_PATH, ReleaseDatabase
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
@@ -309,6 +309,15 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
             if not slug or not name or not url:
                 self._send_json(
                     {"error": "slug, name, release_notes_url은 필수 항목입니다."},
+                    status=400,
+                )
+                return
+
+            if not validate_release_notes_url(url):
+                self._send_json(
+                    {
+                        "error": "유효하지 않은 release_notes_url입니다. https://docs.cloud.google.com 또는 https://cloud.google.com 도메인의 유효한 HTTPS URL이어야 합니다."
+                    },
                     status=400,
                 )
                 return
