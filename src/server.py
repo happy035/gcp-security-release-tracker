@@ -4,13 +4,18 @@ import re
 import threading
 import time
 from datetime import datetime, timedelta
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-from src.crawler import GCPSecurityReleaseCrawler
-from src.database import DEFAULT_CONFIG_PATH, ReleaseDatabase
+try:
+    from src.crawler import GCPSecurityReleaseCrawler
+    from src.database import DEFAULT_CONFIG_PATH, ReleaseDatabase
+except ImportError:
+    from crawler import GCPSecurityReleaseCrawler
+    from database import DEFAULT_CONFIG_PATH, ReleaseDatabase
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 INDEX_TEMPLATE_PATH = TEMPLATE_DIR / "index.html"
@@ -31,6 +36,29 @@ def compute_next_scheduled_run(update_time_str: str, enabled: bool) -> str:
         return candidate.strftime("%Y-%m-%d %H:%M")
     except Exception:
         return ""
+
+
+def get_allowed_admins() -> List[str]:
+    """Retrieve the list of authorized administrator email addresses from config or environment."""
+    emails: List[str] = []
+    if DEFAULT_CONFIG_PATH.exists():
+        try:
+            with open(DEFAULT_CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                admin_cfg = cfg.get("admin_emails", [])
+                if isinstance(admin_cfg, list):
+                    emails = [str(e).strip().lower() for e in admin_cfg if e]
+        except Exception:
+            pass
+
+    env_admins = os.environ.get("ADMIN_EMAILS", "")
+    if env_admins:
+        emails.extend([e.strip().lower() for e in env_admins.split(",") if e.strip()])
+
+    if not emails:
+        emails = ["dragon@jayseo.altostrat.com"]
+
+    return list(dict.fromkeys(emails))
 
 
 class AutoUpdateScheduler:
@@ -98,6 +126,95 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
             self.bootstrap_done_event.wait(timeout=timeout)
         return self.is_bootstrapping
 
+    def _get_current_user(self) -> Dict[str, Any]:
+        """Resolve current user identity and permissions from HTTP headers or session cookies."""
+        allowed_admins = get_allowed_admins()
+        email = ""
+        auth_source = "unauthenticated"
+
+        # 1. Google Identity-Aware Proxy (IAP) header
+        iap_email = self.headers.get("X-Goog-Authenticated-User-Email", "").strip()
+        if iap_email:
+            if ":" in iap_email:
+                iap_email = iap_email.split(":", 1)[1]
+            email = iap_email.strip().lower()
+            auth_source = "gcp_identity_platform"
+
+        # 2. Other standard GCP / proxy headers
+        if not email:
+            goog_user = self.headers.get("X-Goog-User-Email", "").strip()
+            if goog_user:
+                email = goog_user.lower()
+                auth_source = "gcp_identity_platform"
+
+        # 3. Custom auth / admin email headers
+        if not email:
+            auth_email = (
+                self.headers.get("X-Auth-Email", "").strip()
+                or self.headers.get("X-Admin-Email", "").strip()
+            )
+            if auth_email:
+                email = auth_email.lower()
+                auth_source = "auth_header"
+
+        # 4. Authorization header (Bearer token or Bearer <email>)
+        if not email:
+            auth_hdr = self.headers.get("Authorization", "").strip()
+            if auth_hdr.lower().startswith("bearer "):
+                token = auth_hdr[7:].strip()
+                admin_token = os.environ.get("ADMIN_TOKEN", "")
+                if admin_token and token == admin_token:
+                    email = allowed_admins[0] if allowed_admins else "admin"
+                    auth_source = "bearer_token"
+                elif "@" in token:
+                    email = token.lower()
+                    auth_source = "bearer_token"
+
+        # 5. Session cookie
+        if not email:
+            cookie_hdr = self.headers.get("Cookie", "")
+            if cookie_hdr:
+                try:
+                    c = SimpleCookie()
+                    c.load(cookie_hdr)
+                    for key in ("auth_user", "user_email", "admin_email", "session_user"):
+                        if key in c:
+                            val = c[key].value.strip()
+                            if val:
+                                email = val.lower()
+                                auth_source = "session_cookie"
+                                break
+                except Exception:
+                    pass
+
+        is_authenticated = bool(email)
+        is_admin = is_authenticated and (email in allowed_admins)
+
+        return {
+            "email": email,
+            "is_authenticated": is_authenticated,
+            "is_admin": is_admin,
+            "auth_source": auth_source,
+            "allowed_admins": allowed_admins,
+        }
+
+    def _require_admin(self) -> bool:
+        """Verify that caller is authenticated and authorized as an administrator."""
+        user = self._get_current_user()
+        if not user["is_authenticated"]:
+            self._send_json(
+                {"error": "Unauthorized", "message": "Authentication required"},
+                status=401,
+            )
+            return False
+        if not user["is_admin"]:
+            self._send_json(
+                {"error": "Forbidden", "message": "Administrator privileges required"},
+                status=403,
+            )
+            return False
+        return True
+
     def _send_json(
         self,
         payload: Dict[str, Any],
@@ -164,8 +281,32 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
                 self._send_html("<h1>Template not found</h1>", status=404)
             return
 
-        # 2. Admin Console: Accessible directly without authentication
+        # 2. Admin Console: Accessible only by authenticated administrators
         if path in ("/admin", "/admin/"):
+            user = self._get_current_user()
+            if not user["is_authenticated"]:
+                self._send_html(
+                    "<!DOCTYPE html><html><head><title>401 Unauthorized</title></head>"
+                    "<body style='font-family:sans-serif;padding:2rem;'>"
+                    "<h1>401 Unauthorized</h1>"
+                    "<p>Authentication required to access the Admin Console.</p>"
+                    "<p><a href='/'>Return to Main Dashboard</a></p>"
+                    "</body></html>",
+                    status=401,
+                )
+                return
+            if not user["is_admin"]:
+                self._send_html(
+                    "<!DOCTYPE html><html><head><title>403 Forbidden</title></head>"
+                    "<body style='font-family:sans-serif;padding:2rem;'>"
+                    "<h1>403 Forbidden</h1>"
+                    "<p>Access denied. Administrator privileges required.</p>"
+                    "<p><a href='/'>Return to Main Dashboard</a></p>"
+                    "</body></html>",
+                    status=403,
+                )
+                return
+
             if ADMIN_TEMPLATE_PATH.exists():
                 self._send_html(ADMIN_TEMPLATE_PATH.read_text(encoding="utf-8"))
             else:
@@ -174,13 +315,14 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
 
         # 3. User metadata endpoint
         if path == "/api/me":
+            user = self._get_current_user()
             self._send_json(
                 {
-                    "email": "public_user",
-                    "is_admin": True,
+                    "email": user["email"],
+                    "is_admin": user["is_admin"],
                     "is_viewer": True,
-                    "auth_source": "open_access",
-                    "allowed_admins": ["public_user"],
+                    "auth_source": user["auth_source"],
+                    "allowed_admins": user["allowed_admins"],
                 }
             )
             return
@@ -235,8 +377,10 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
 
         # 8. Logout fallback
         if path == "/api/auth/logout":
+            clear_cookie = "auth_user=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; HttpOnly"
             self.send_response(302)
             self.send_header("Location", "/")
+            self.send_header("Set-Cookie", clear_cookie)
             self.end_headers()
             return
 
@@ -246,13 +390,40 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
 
+        # Login
+        if path == "/api/auth/login":
+            body = self._read_json_body()
+            email = (body.get("email") or "").strip().lower()
+            if not email:
+                self._send_json({"error": "email is required"}, status=400)
+                return
+            allowed_admins = get_allowed_admins()
+            is_admin = email in allowed_admins
+            cookie_val = f"auth_user={email}; Path=/; HttpOnly; SameSite=Lax"
+            self._send_json(
+                {
+                    "message": "로그인되었습니다.",
+                    "email": email,
+                    "is_admin": is_admin,
+                    "auth_source": "session_cookie",
+                },
+                extra_headers=[("Set-Cookie", cookie_val)],
+            )
+            return
+
         # Logout
         if path == "/api/auth/logout":
-            self._send_json({"message": "로그아웃되었습니다."})
+            clear_cookie = "auth_user=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; HttpOnly"
+            self._send_json(
+                {"message": "로그아웃되었습니다."},
+                extra_headers=[("Set-Cookie", clear_cookie)],
+            )
             return
 
         # DB Reset and Crawl
         if path == "/api/reset-and-crawl":
+            if not self._require_admin():
+                return
             cls = self.__class__
             with cls.bootstrap_lock:
                 cls.is_bootstrapping = True
@@ -274,10 +445,11 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        body = self._read_json_body()
-
         # Crawl
         if path == "/api/crawl":
+            if not self._require_admin():
+                return
+            body = self._read_json_body()
             product_slug = body.get("product_slug")
             override_date = body.get("override_baseline_date")
             include_same_day = bool(body.get("include_same_day", False))
@@ -298,6 +470,9 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
 
         # Add or update product
         if path == "/api/products":
+            if not self._require_admin():
+                return
+            body = self._read_json_body()
             slug = (body.get("slug") or "").strip().lower()
             name = (body.get("name") or "").strip()
             url = (body.get("release_notes_url") or "").strip()
@@ -330,10 +505,12 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
-        body = self._read_json_body()
 
         # Settings update
         if path == "/api/settings":
+            if not self._require_admin():
+                return
+            body = self._read_json_body()
             auto_update_enabled = body.get("auto_update_enabled")
             auto_update_time = body.get("auto_update_time")
             recent_highlight_days = body.get("recent_highlight_days")
@@ -358,6 +535,9 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
         # Snapshot date update
         m = re.match(r"^/api/products/([^/]+)/snapshot$", path)
         if m:
+            if not self._require_admin():
+                return
+            body = self._read_json_body()
             slug = m.group(1)
             snapshot_date = (body.get("snapshot_date") or "").strip()
             clear_after_date = bool(body.get("clear_after_date", False))
