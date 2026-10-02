@@ -1,15 +1,20 @@
 import hashlib
 import html
+import ipaddress
 import re
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 
-from src.database import ReleaseDatabase
+try:
+    from src.database import ReleaseDatabase
+except ImportError:
+    from database import ReleaseDatabase
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -273,20 +278,78 @@ def parse_gcp_release_notes_html(
     return parsed_items
 
 
+def is_safe_release_notes_url(url: str) -> bool:
+    """Validate that release_notes_url is a safe HTTPS URL pointing to official GCP documentation."""
+    if not url or not isinstance(url, str):
+        return False
+    try:
+        if "\x00" in url or "\r" in url or "\n" in url:
+            return False
+        parsed = urlparse(url.strip())
+        if parsed.scheme.lower() != "https":
+            return False
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        if not hostname:
+            return False
+        if parsed.username or parsed.password:
+            return False
+        if parsed.port is not None and parsed.port != 443:
+            return False
+        if not re.match(
+            r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$",
+            hostname,
+        ):
+            return False
+        if hostname != "cloud.google.com" and not hostname.endswith(".cloud.google.com"):
+            return False
+        try:
+            addr_info = socket.getaddrinfo(hostname, 443, proto=socket.IPPROTO_TCP)
+            for *_, sockaddr in addr_info:
+                ip = ipaddress.ip_address(sockaddr[0])
+                if (
+                    ip.is_private
+                    or ip.is_loopback
+                    or ip.is_link_local
+                    or ip.is_reserved
+                    or ip.is_multicast
+                    or ip.is_unspecified
+                ):
+                    return False
+        except (socket.gaierror, socket.timeout):
+            pass
+        except Exception:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 class GCPSecurityReleaseCrawler:
     """Fetches GCP Security product release notes and scans updates after the snapshot date."""
 
     def __init__(self, db: Optional[ReleaseDatabase] = None):
         self.db = db or ReleaseDatabase()
 
-    def fetch_html(self, url: str, timeout: int = 25) -> str:
-        resp = requests.get(
-            url,
-            headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        return resp.text
+    def fetch_html(self, url: str, timeout: int = 25, max_redirects: int = 5) -> str:
+        current_url = url
+        for _ in range(max_redirects + 1):
+            if not is_safe_release_notes_url(current_url):
+                raise ValueError(f"허용되지 않은 release_notes_url입니다: {current_url}")
+            resp = requests.get(
+                current_url,
+                headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
+                timeout=timeout,
+                allow_redirects=False,
+            )
+            if resp.is_redirect or resp.status_code in (301, 302, 303, 307, 308):
+                location = resp.headers.get("Location")
+                if not location:
+                    break
+                current_url = urljoin(current_url, location)
+                continue
+            resp.raise_for_status()
+            return resp.text
+        raise ValueError(f"너무 많은 리디렉션이 발생했습니다: {url}")
 
     def crawl_product(
         self,
@@ -306,6 +369,29 @@ class GCPSecurityReleaseCrawler:
 
         baseline_date = (override_baseline_date or product["snapshot_date"]).strip()
         url = product["release_notes_url"]
+
+        if not is_safe_release_notes_url(url):
+            err_msg = f"크롤링 실패: 허용되지 않은 URL입니다 ({url})"
+            self.db.record_crawl_result(
+                product_id=product["id"],
+                baseline_date=baseline_date,
+                new_snapshot_date=baseline_date,
+                items=[],
+                status="FAILED",
+                message=err_msg,
+            )
+            return {
+                "product_slug": product_slug,
+                "product_name": product["name"],
+                "url": url,
+                "baseline_date": baseline_date,
+                "new_snapshot_date": baseline_date,
+                "scanned_count": 0,
+                "inserted_count": 0,
+                "updated_count": 0,
+                "status": "FAILED",
+                "message": err_msg,
+            }
 
         try:
             raw_html = self.fetch_html(url)
