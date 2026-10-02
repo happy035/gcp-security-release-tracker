@@ -10,6 +10,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.connection import HTTPSConnection
+from urllib3.connectionpool import HTTPSConnectionPool
+from urllib3.exceptions import ConnectTimeoutError, NameResolutionError, NewConnectionError
+from urllib3.poolmanager import PoolManager
+from urllib3.util.connection import _DEFAULT_TIMEOUT, _set_socket_options
 
 try:
     from src.database import ReleaseDatabase
@@ -45,10 +51,11 @@ def is_safe_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return True
 
 
-def validate_release_notes_url(url: str) -> None:
+def validate_release_notes_url(url: str) -> List[str]:
     """
     Validate that release_notes_url uses HTTPS, targets an allowed Google Cloud domain,
     and resolves to safe, public IP addresses to protect against SSRF.
+    Returns the list of validated safe IP addresses.
     """
     if not url or not isinstance(url, str):
         raise ValueError("URL must be a non-empty string")
@@ -67,14 +74,7 @@ def validate_release_notes_url(url: str) -> None:
     if parsed.port and parsed.port != 443:
         raise ValueError(f"Port {parsed.port} is not allowed. Only HTTPS port 443 is permitted.")
 
-    is_domain_allowed = (
-        hostname in ALLOWED_DOMAINS
-        or hostname == "google.com"
-        or hostname.endswith(".google.com")
-        or hostname == "cloud.google"
-        or hostname.endswith(".cloud.google")
-    )
-    if not is_domain_allowed:
+    if hostname not in ALLOWED_DOMAINS:
         raise ValueError(
             f"Disallowed domain '{hostname}'. Only Google Cloud documentation domains are permitted."
         )
@@ -87,6 +87,7 @@ def validate_release_notes_url(url: str) -> None:
     if not addr_info:
         raise ValueError(f"Could not resolve host '{hostname}'")
 
+    safe_ips: List[str] = []
     for entry in addr_info:
         sockaddr = entry[4]
         ip_str = sockaddr[0]
@@ -100,6 +101,10 @@ def validate_release_notes_url(url: str) -> None:
 
         if not is_safe_ip(ip_obj):
             raise ValueError(f"Access to private/internal IP address '{ip_str}' is blocked")
+        if ip_str not in safe_ips:
+            safe_ips.append(ip_str)
+
+    return safe_ips
 
 DATE_FORMATS = [
     "%B %d, %Y",   # September 16, 2026
@@ -358,6 +363,112 @@ def parse_gcp_release_notes_html(
     return parsed_items
 
 
+def _connect_to_ip(
+    ip_str: str,
+    port: int,
+    timeout: Any,
+    source_address: Optional[Tuple[str, int]] = None,
+    socket_options: Any = None,
+) -> socket.socket:
+    cleaned_ip = ip_str.strip("[]")
+    ip_obj = ipaddress.ip_address(cleaned_ip)
+    if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped:
+        ip_obj = ip_obj.ipv4_mapped
+    if not is_safe_ip(ip_obj):
+        raise ValueError(f"Access to private/internal IP address '{cleaned_ip}' is blocked")
+
+    af = socket.AF_INET6 if ip_obj.version == 6 else socket.AF_INET
+    sock = socket.socket(af, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+    try:
+        _set_socket_options(sock, socket_options)
+        if timeout is not None and timeout != _DEFAULT_TIMEOUT:
+            if isinstance(timeout, (int, float)):
+                sock.settimeout(timeout)
+            elif hasattr(timeout, "connect_timeout") and isinstance(timeout.connect_timeout, (int, float)):
+                sock.settimeout(timeout.connect_timeout)
+        if source_address:
+            sock.bind(source_address)
+        sa = (cleaned_ip, port, 0, 0) if ip_obj.version == 6 else (cleaned_ip, port)
+        sock.connect(sa)
+        return sock
+    except Exception:
+        sock.close()
+        raise
+
+
+class SSRFProtectedPoolManager(PoolManager):
+    def __init__(self, *args, pinned_ips: Optional[Dict[str, str]] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.pinned_ips = pinned_ips if pinned_ips is not None else {}
+        self.pool_classes_by_scheme["https"] = self._create_pool_class()
+
+    def _create_pool_class(self):
+        pool_manager = self
+
+        class SSRFProtectedHTTPSConnection(HTTPSConnection):
+            def _new_conn(self) -> socket.socket:
+                host = self._dns_host
+                port = self.port or 443
+                pinned_ip = pool_manager.pinned_ips.get(host)
+                if not pinned_ip:
+                    addr_info = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+                    if not addr_info:
+                        raise ValueError(f"Could not resolve host '{host}'")
+                    for entry in addr_info:
+                        ip_str = entry[4][0]
+                        ip_obj = ipaddress.ip_address(ip_str.strip("[]"))
+                        if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped:
+                            ip_obj = ip_obj.ipv4_mapped
+                        if not is_safe_ip(ip_obj):
+                            raise ValueError(f"Access to private/internal IP address '{ip_str}' is blocked")
+                    pinned_ip = addr_info[0][4][0]
+
+                try:
+                    sock = _connect_to_ip(
+                        pinned_ip,
+                        port,
+                        timeout=self.timeout,
+                        source_address=self.source_address,
+                        socket_options=self.socket_options,
+                    )
+                except socket.gaierror as e:
+                    raise NameResolutionError(self.host, self, e) from e
+                except socket.timeout as e:
+                    raise ConnectTimeoutError(
+                        self,
+                        f"Connection to {self.host} timed out. (connect timeout={self.timeout})",
+                    ) from e
+                except OSError as e:
+                    raise NewConnectionError(
+                        self, f"Failed to establish a new connection: {e}"
+                    ) from e
+
+                return sock
+
+        class SSRFProtectedHTTPSConnectionPool(HTTPSConnectionPool):
+            ConnectionCls = SSRFProtectedHTTPSConnection
+
+        return SSRFProtectedHTTPSConnectionPool
+
+
+class SSRFProtectedHTTPAdapter(HTTPAdapter):
+    def __init__(self, pinned_ips: Optional[Dict[str, str]] = None, **kwargs):
+        self.pinned_ips = pinned_ips if pinned_ips is not None else {}
+        super().__init__(**kwargs)
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        self._pool_connections = connections
+        self._pool_maxsize = maxsize
+        self._pool_block = block
+        self.poolmanager = SSRFProtectedPoolManager(
+            num_pools=connections,
+            maxsize=maxsize,
+            block=block,
+            pinned_ips=self.pinned_ips,
+            **pool_kwargs,
+        )
+
+
 class GCPSecurityReleaseCrawler:
     """Fetches GCP Security product release notes and scans updates after the snapshot date."""
 
@@ -367,22 +478,31 @@ class GCPSecurityReleaseCrawler:
     def fetch_html(self, url: str, timeout: int = 25) -> str:
         current_url = url
         max_redirects = 5
-        for _ in range(max_redirects):
-            validate_release_notes_url(current_url)
-            resp = requests.get(
-                current_url,
-                headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
-                timeout=timeout,
-                allow_redirects=False,
-            )
-            if resp.is_redirect or resp.status_code in (301, 302, 303, 307, 308):
-                location = resp.headers.get("Location")
-                if not location:
-                    raise ValueError(f"Redirect response missing Location header from {current_url}")
-                current_url = urljoin(current_url, location)
-                continue
-            resp.raise_for_status()
-            return resp.text
+        pinned_ips: Dict[str, str] = {}
+        adapter = SSRFProtectedHTTPAdapter(pinned_ips=pinned_ips)
+        with requests.Session() as session:
+            session.mount("https://", adapter)
+            for _ in range(max_redirects):
+                safe_ips = validate_release_notes_url(current_url)
+                parsed = urlparse(current_url.strip())
+                hostname = (parsed.hostname or "").strip().lower()
+                if safe_ips:
+                    pinned_ips[hostname] = safe_ips[0]
+
+                resp = session.get(
+                    current_url,
+                    headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
+                    timeout=timeout,
+                    allow_redirects=False,
+                )
+                if resp.is_redirect or resp.status_code in (301, 302, 303, 307, 308):
+                    location = resp.headers.get("Location")
+                    if not location:
+                        raise ValueError(f"Redirect response missing Location header from {current_url}")
+                    current_url = urljoin(current_url, location)
+                    continue
+                resp.raise_for_status()
+                return resp.text
         raise ValueError(f"Too many redirects from {url}")
 
     def crawl_product(
