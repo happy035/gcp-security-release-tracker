@@ -402,6 +402,16 @@
       }
     }
 
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     function getTodayDateString() {
       if (adminSettings.server_date) return adminSettings.server_date;
       const now = new Date();
@@ -568,23 +578,23 @@
           ? `<span class="inline-block w-2 h-2 rounded-full bg-emerald-500" title="${dict.statusActive}"></span>`
           : `<span class="inline-block w-2 h-2 rounded-full bg-slate-300" title="${dict.statusInactive}"></span>`;
         const recentProductPill = hasRecentWeekUpdate
-          ? `<span class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-bold bg-rose-100 text-rose-700 border border-rose-300 rounded recent-badge-pulse" title="${dict.recentWeekTooltip(p.latest_release_date)}">🔥 NEW</span>`
+          ? `<span class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-bold bg-rose-100 text-rose-700 border border-rose-300 rounded recent-badge-pulse" title="${escapeHtml(dict.recentWeekTooltip(p.latest_release_date))}">🔥 NEW</span>`
           : '';
         const nameColorClass = hasRecentWeekUpdate ? 'text-rose-700 font-bold' : 'text-slate-900 font-semibold';
 
         html += `
           <div class="px-4 py-3 transition ${isSelected ? 'bg-blue-50/80 border-l-4 border-blue-600' : 'hover:bg-slate-50'}">
-            <div class="flex items-start justify-between cursor-pointer" onclick="selectProduct('${p.slug}')">
+            <div class="flex items-start justify-between cursor-pointer" data-slug="${escapeHtml(p.slug)}" onclick="selectProduct(this.dataset.slug)">
               <div class="space-y-0.5 pr-2">
                 <div class="flex flex-wrap items-center gap-1.5">
                   ${enabledBadge}
-                  <span class="text-sm ${nameColorClass}">${p.name}</span>
+                  <span class="text-sm ${nameColorClass}">${escapeHtml(p.name)}</span>
                   ${recentProductPill}
                 </div>
-                <div class="text-xs text-slate-500">${p.category || 'Security'}</div>
+                <div class="text-xs text-slate-500">${escapeHtml(p.category || 'Security')}</div>
                 <div class="text-[11px] text-slate-400">
                   ${dict.lastScanLabel}: <strong class="text-slate-600">${lastScanDate || '-'}</strong>
-                  ${p.latest_release_date ? ` · ${dict.latestReleaseLabel}: <span class="${hasRecentWeekUpdate ? 'text-rose-600 font-semibold' : 'text-slate-500'}">${p.latest_release_date}</span>` : ''}
+                  ${p.latest_release_date ? ` · ${dict.latestReleaseLabel}: <span class="${hasRecentWeekUpdate ? 'text-rose-600 font-semibold' : 'text-slate-500'}">${escapeHtml(p.latest_release_date)}</span>` : ''}
                 </div>
               </div>
               <span class="text-xs font-bold px-2 py-0.5 rounded-full ${isSelected ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700'}">
@@ -799,7 +809,7 @@
                     ⚠️ ${normCategory}
                   </span>
                   <span class="text-xs sm:text-sm font-bold text-white">
-                    ${item.product_name}
+                    ${escapeHtml(item.product_name)}
                   </span>
                   <span class="text-[11px] font-medium text-blue-200">
                     ${dict.deprecatedNotice}
@@ -825,7 +835,7 @@
                     🔥 ${normCategory}
                   </span>
                   <span class="text-xs sm:text-sm font-bold text-white">
-                    ${item.product_name}
+                    ${escapeHtml(item.product_name)}
                   </span>
                   <span class="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold bg-black/20 text-white rounded-md">
                     ✨ ${dict.recentItemBadge(daysLimit, daysAgoText)}
@@ -846,7 +856,7 @@
                     ${normCategory}
                   </span>
                   <span class="text-xs font-semibold text-slate-700 bg-slate-100 px-2.5 py-0.5 rounded">
-                    ${item.product_name}
+                    ${escapeHtml(item.product_name)}
                   </span>
                 </div>
                 <a href="${item.source_url}" target="_blank" rel="noopener"
