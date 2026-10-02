@@ -37,6 +37,46 @@ def compute_next_scheduled_run(update_time_str: str, enabled: bool) -> str:
         return ""
 
 
+def get_allowed_admin_emails() -> List[str]:
+    env_emails = os.environ.get("ADMIN_EMAILS") or os.environ.get("ADMIN_EMAIL")
+    if env_emails:
+        emails = [e.strip().lower() for e in env_emails.split(",") if e.strip()]
+        if emails:
+            return emails
+
+    path = DEFAULT_CONFIG_PATH
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            emails = cfg.get("admin_emails", [])
+            if isinstance(emails, list) and emails:
+                return [e.strip().lower() for e in emails if isinstance(e, str) and e.strip()]
+        except Exception:
+            pass
+    return ["dragon@jayseo.altostrat.com"]
+
+
+def parse_cookie_header(cookie_header: str) -> Dict[str, str]:
+    if not cookie_header:
+        return {}
+    cookies: Dict[str, str] = {}
+    try:
+        from http.cookies import SimpleCookie
+        c = SimpleCookie()
+        c.load(cookie_header)
+        for k, v in c.items():
+            cookies[k.lower()] = v.value
+    except Exception:
+        pass
+    if not cookies:
+        for part in cookie_header.split(";"):
+            if "=" in part:
+                k, v = part.strip().split("=", 1)
+                cookies[k.strip().lower()] = v.strip()
+    return cookies
+
+
 class AutoUpdateScheduler:
     """Background daemon scheduler that automatically runs release note crawling at the configured daily time."""
 
@@ -155,6 +195,97 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
         settings["bootstrapping"] = self.is_bootstrapping
         return settings
 
+    def _get_authenticated_user(self) -> Dict[str, Any]:
+        allowed_admins = get_allowed_admin_emails()
+
+        # 1. Google Identity-Aware Proxy (IAP) header
+        iap_header = (self.headers.get("X-Goog-Authenticated-User-Email") or "").strip()
+        if iap_header:
+            email = iap_header.split(":")[-1].strip().lower()
+            if email:
+                return {
+                    "email": email,
+                    "is_admin": email in allowed_admins,
+                    "is_viewer": True,
+                    "auth_source": "gcp_iap",
+                    "allowed_admins": allowed_admins,
+                }
+
+        # 2. Other GCP / reverse-proxy headers
+        for hdr_name in ("X-Goog-User-Email", "X-Forwarded-Email", "X-User-Email", "X-Admin-Email"):
+            hdr_val = (self.headers.get(hdr_name) or "").strip()
+            if hdr_val:
+                email = hdr_val.split(":")[-1].strip().lower()
+                return {
+                    "email": email,
+                    "is_admin": email in allowed_admins,
+                    "is_viewer": True,
+                    "auth_source": "gcp_identity_platform",
+                    "allowed_admins": allowed_admins,
+                }
+
+        # 3. Authorization Bearer header
+        auth_header = (self.headers.get("Authorization") or "").strip()
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:].strip().lower()
+            admin_secret = (os.environ.get("ADMIN_API_KEY") or os.environ.get("ADMIN_TOKEN") or "").strip().lower()
+            if admin_secret and token == admin_secret:
+                return {
+                    "email": allowed_admins[0] if allowed_admins else "admin@local",
+                    "is_admin": True,
+                    "is_viewer": True,
+                    "auth_source": "bearer_token",
+                    "allowed_admins": allowed_admins,
+                }
+            if token:
+                return {
+                    "email": token,
+                    "is_admin": token in allowed_admins,
+                    "is_viewer": True,
+                    "auth_source": "bearer_token",
+                    "allowed_admins": allowed_admins,
+                }
+
+        # 4. Session Cookies
+        cookies = parse_cookie_header(self.headers.get("Cookie", ""))
+        for cookie_key in ("admin_session", "admin_email", "user_email", "auth_user", "tracker_session", "session"):
+            cookie_val = cookies.get(cookie_key, "").strip().lower()
+            if cookie_val:
+                return {
+                    "email": cookie_val,
+                    "is_admin": cookie_val in allowed_admins,
+                    "is_viewer": True,
+                    "auth_source": "session_cookie",
+                    "allowed_admins": allowed_admins,
+                }
+
+        # 5. Unauthenticated
+        return {
+            "email": "unauthenticated",
+            "is_admin": False,
+            "is_viewer": True,
+            "auth_source": "none",
+            "allowed_admins": allowed_admins,
+        }
+
+    def _require_admin(self) -> bool:
+        sec_fetch_site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if sec_fetch_site == "cross-site":
+            self._send_json({"error": "Forbidden: Cross-site request rejected."}, status=403)
+            return False
+
+        user = self._get_authenticated_user()
+        if not user.get("is_admin"):
+            status_code = 403 if user.get("email") != "unauthenticated" else 401
+            msg = (
+                "Forbidden: Administrator privileges required."
+                if status_code == 403
+                else "Unauthorized: Administrator access required."
+            )
+            self._send_json({"error": msg}, status=status_code)
+            return False
+        return True
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
@@ -168,25 +299,34 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
                 self._send_html("<h1>Template not found</h1>", status=404)
             return
 
-        # 2. Admin Console: Accessible directly without authentication
+        # 2. Admin Console: Accessible only to authenticated administrators
         if path in ("/admin", "/admin/"):
+            user = self._get_authenticated_user()
+            if not user.get("is_admin"):
+                status_code = 403 if user.get("email") != "unauthenticated" else 401
+                msg = (
+                    "Forbidden: Administrator privileges required."
+                    if status_code == 403
+                    else "Unauthorized: Administrator access required."
+                )
+                self._send_html(f"<h1>{status_code} {msg}</h1><p>{msg}</p>", status=status_code)
+                return
+
+            extra_headers = []
+            if user.get("email") and user.get("email") != "unauthenticated":
+                extra_headers.append(
+                    ("Set-Cookie", f"admin_session={user['email']}; Path=/; HttpOnly; SameSite=Lax")
+                )
             if ADMIN_TEMPLATE_PATH.exists():
-                self._send_html(ADMIN_TEMPLATE_PATH.read_text(encoding="utf-8"))
+                self._send_html(ADMIN_TEMPLATE_PATH.read_text(encoding="utf-8"), extra_headers=extra_headers)
             else:
                 self._send_html("<h1>Admin template not found</h1>", status=404)
             return
 
         # 3. User metadata endpoint
         if path == "/api/me":
-            self._send_json(
-                {
-                    "email": "public_user",
-                    "is_admin": True,
-                    "is_viewer": True,
-                    "auth_source": "open_access",
-                    "allowed_admins": ["public_user"],
-                }
-            )
+            user = self._get_authenticated_user()
+            self._send_json(user)
             return
 
         # 4. Settings
@@ -241,6 +381,12 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/auth/logout":
             self.send_response(302)
             self.send_header("Location", "/")
+            self.send_header("Set-Cookie", "admin_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+            self.send_header("Set-Cookie", "user_email=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+            self.send_header("Set-Cookie", "admin_email=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+            self.send_header("Set-Cookie", "auth_user=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+            self.send_header("Set-Cookie", "tracker_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+            self.send_header("Set-Cookie", "session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
             self.end_headers()
             return
 
@@ -252,7 +398,21 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
 
         # Logout
         if path == "/api/auth/logout":
-            self._send_json({"message": "로그아웃되었습니다."})
+            self._send_json(
+                {"message": "로그아웃되었습니다."},
+                extra_headers=[
+                    ("Set-Cookie", "admin_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"),
+                    ("Set-Cookie", "user_email=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"),
+                    ("Set-Cookie", "admin_email=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"),
+                    ("Set-Cookie", "auth_user=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"),
+                    ("Set-Cookie", "tracker_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"),
+                    ("Set-Cookie", "session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"),
+                ],
+            )
+            return
+
+        # Enforce administrative access control
+        if not self._require_admin():
             return
 
         # DB Reset and Crawl
@@ -343,6 +503,11 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
+
+        # Enforce administrative access control
+        if not self._require_admin():
+            return
+
         body = self._read_json_body()
 
         # Settings update
