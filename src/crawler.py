@@ -10,6 +10,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.connection import HTTPSConnection
+from urllib3.util import connection as urllib3_conn
 
 try:
     from src.database import ReleaseDatabase
@@ -45,7 +48,7 @@ def is_safe_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return True
 
 
-def validate_release_notes_url(url: str) -> None:
+def validate_release_notes_url(url: str) -> List[str]:
     """
     Validate that release_notes_url uses HTTPS, targets an allowed Google Cloud domain,
     and resolves to safe, public IP addresses to protect against SSRF.
@@ -67,13 +70,7 @@ def validate_release_notes_url(url: str) -> None:
     if parsed.port and parsed.port != 443:
         raise ValueError(f"Port {parsed.port} is not allowed. Only HTTPS port 443 is permitted.")
 
-    is_domain_allowed = (
-        hostname in ALLOWED_DOMAINS
-        or hostname == "google.com"
-        or hostname.endswith(".google.com")
-        or hostname == "cloud.google"
-        or hostname.endswith(".cloud.google")
-    )
+    is_domain_allowed = hostname in ALLOWED_DOMAINS
     if not is_domain_allowed:
         raise ValueError(
             f"Disallowed domain '{hostname}'. Only Google Cloud documentation domains are permitted."
@@ -87,6 +84,7 @@ def validate_release_notes_url(url: str) -> None:
     if not addr_info:
         raise ValueError(f"Could not resolve host '{hostname}'")
 
+    safe_ips: List[str] = []
     for entry in addr_info:
         sockaddr = entry[4]
         ip_str = sockaddr[0]
@@ -100,6 +98,10 @@ def validate_release_notes_url(url: str) -> None:
 
         if not is_safe_ip(ip_obj):
             raise ValueError(f"Access to private/internal IP address '{ip_str}' is blocked")
+        if ip_str not in safe_ips:
+            safe_ips.append(ip_str)
+
+    return safe_ips
 
 DATE_FORMATS = [
     "%B %d, %Y",   # September 16, 2026
@@ -358,6 +360,63 @@ def parse_gcp_release_notes_html(
     return parsed_items
 
 
+class PinnedHTTPSConnection(HTTPSConnection):
+    pinned_ips: List[str] = []
+
+    def _new_conn(self) -> socket.socket:
+        if not self.pinned_ips:
+            return super()._new_conn()
+
+        err = None
+        for ip in self.pinned_ips:
+            sock = None
+            try:
+                ip_obj = ipaddress.ip_address(ip)
+                if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped:
+                    ip_obj = ip_obj.ipv4_mapped
+                if not is_safe_ip(ip_obj):
+                    continue
+                af = socket.AF_INET6 if ip_obj.version == 6 else socket.AF_INET
+                sock = socket.socket(af, socket.SOCK_STREAM)
+                urllib3_conn._set_socket_options(sock, self.socket_options)
+                if self.timeout is not urllib3_conn._DEFAULT_TIMEOUT:
+                    sock.settimeout(self.timeout)
+                if self.source_address:
+                    sock.bind(self.source_address)
+                sock.connect((ip, self.port))
+                return sock
+            except OSError as e:
+                err = e
+                if sock is not None:
+                    sock.close()
+        if err is not None:
+            raise err
+        raise OSError("No safe IP addresses available to connect")
+
+
+class PinnedAdapter(HTTPAdapter):
+    def __init__(self, pinned_ips: Optional[List[str]] = None, **kwargs):
+        self.pinned_ips = pinned_ips or []
+        super().__init__(**kwargs)
+
+    def _apply_pinned_conn(self, pool):
+        if hasattr(pool, "ConnectionCls"):
+            pool.ConnectionCls = type(
+                "PinnedConn",
+                (PinnedHTTPSConnection,),
+                {"pinned_ips": self.pinned_ips},
+            )
+        return pool
+
+    def get_connection(self, url, proxies=None):
+        pool = super().get_connection(url, proxies=proxies)
+        return self._apply_pinned_conn(pool)
+
+    def get_connection_with_tls_context(self, request, verify, proxies=None, cert=None):
+        pool = super().get_connection_with_tls_context(request, verify, proxies=proxies, cert=cert)
+        return self._apply_pinned_conn(pool)
+
+
 class GCPSecurityReleaseCrawler:
     """Fetches GCP Security product release notes and scans updates after the snapshot date."""
 
@@ -368,13 +427,19 @@ class GCPSecurityReleaseCrawler:
         current_url = url
         max_redirects = 5
         for _ in range(max_redirects):
-            validate_release_notes_url(current_url)
-            resp = requests.get(
-                current_url,
-                headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
-                timeout=timeout,
-                allow_redirects=False,
-            )
+            safe_ips = validate_release_notes_url(current_url)
+            session = requests.Session()
+            session.mount("https://", PinnedAdapter(pinned_ips=safe_ips))
+            try:
+                resp = session.get(
+                    current_url,
+                    headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
+                    timeout=timeout,
+                    allow_redirects=False,
+                )
+            finally:
+                session.close()
+
             if resp.is_redirect or resp.status_code in (301, 302, 303, 307, 308):
                 location = resp.headers.get("Location")
                 if not location:
