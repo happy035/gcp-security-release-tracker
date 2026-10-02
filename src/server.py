@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import re
@@ -313,6 +314,36 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if not re.match(r"^[a-z0-9_-]+$", slug):
+                self._send_json(
+                    {"error": "slug는 영문 소문자, 숫자, '-', '_'만 사용할 수 있습니다."},
+                    status=400,
+                )
+                return
+
+            parsed_url = urlparse(url)
+            if (
+                parsed_url.scheme not in ("http", "https")
+                or not parsed_url.netloc
+                or re.search(r"[\s\"'<>]", url)
+            ):
+                self._send_json(
+                    {"error": "release_notes_url은 유효한 http 또는 https URL이어야 합니다."},
+                    status=400,
+                )
+                return
+
+            if not re.match(r"^\d{4}-\d{2}-\d{2}$", snapshot_date):
+                self._send_json(
+                    {"error": "snapshot_date 형식이 올바르지 않습니다 (YYYY-MM-DD)."},
+                    status=400,
+                )
+                return
+
+            name = html.escape(name, quote=True)
+            category = html.escape(category, quote=True)
+            description = html.escape(description, quote=True)
+
             product = self.db.upsert_product(
                 slug=slug,
                 name=name,
@@ -365,6 +396,13 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
 
             if not snapshot_date:
                 self._send_json({"error": "snapshot_date is required"}, status=400)
+                return
+
+            if not re.match(r"^\d{4}-\d{2}-\d{2}$", snapshot_date):
+                self._send_json(
+                    {"error": "snapshot_date 형식이 올바르지 않습니다 (YYYY-MM-DD)."},
+                    status=400,
+                )
                 return
 
             updated = self.db.update_product_snapshot(
