@@ -1,15 +1,62 @@
 import hashlib
 import html
+import ipaddress
 import re
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 
 from src.database import ReleaseDatabase
+
+ALLOWED_DOMAINS = {"docs.cloud.google.com", "cloud.google.com"}
+
+
+def is_ip_address_allowed(ip_str: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        return not (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        )
+    except ValueError:
+        return False
+
+
+def validate_release_notes_url(url: str) -> bool:
+    if not url or not isinstance(url, str):
+        return False
+    try:
+        parsed = urlparse(url.strip())
+        if parsed.scheme.lower() != "https":
+            return False
+        hostname = (parsed.hostname or "").lower()
+        if not hostname or hostname not in ALLOWED_DOMAINS:
+            return False
+        if parsed.port is not None and parsed.port != 443:
+            return False
+        if parsed.username or parsed.password:
+            return False
+
+        try:
+            addr_infos = socket.getaddrinfo(hostname, 443, proto=socket.IPPROTO_TCP)
+            for *_, sockaddr in addr_infos:
+                if not is_ip_address_allowed(sockaddr[0]):
+                    return False
+        except socket.gaierror:
+            pass
+
+        return True
+    except Exception:
+        return False
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -280,13 +327,26 @@ class GCPSecurityReleaseCrawler:
         self.db = db or ReleaseDatabase()
 
     def fetch_html(self, url: str, timeout: int = 25) -> str:
-        resp = requests.get(
-            url,
-            headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        return resp.text
+        if not validate_release_notes_url(url):
+            raise ValueError(f"허용되지 않은 URL입니다: {url}")
+
+        with requests.Session() as session:
+            def _validate_redirect(resp, *args, **kwargs):
+                if resp.is_redirect:
+                    redirect_url = resp.headers.get("location")
+                    if redirect_url:
+                        target = urljoin(resp.url, redirect_url)
+                        if not validate_release_notes_url(target):
+                            raise ValueError(f"허용되지 않은 리디렉션 대상입니다: {target}")
+
+            session.hooks["response"].append(_validate_redirect)
+            resp = session.get(
+                url,
+                headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            return resp.text
 
     def crawl_product(
         self,
