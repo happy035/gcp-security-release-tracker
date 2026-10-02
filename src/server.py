@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import re
@@ -444,16 +445,30 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
         # Add or update product
         if path == "/api/products":
             slug = (body.get("slug") or "").strip().lower()
-            name = (body.get("name") or "").strip()
+            name = html.escape((body.get("name") or "").strip(), quote=True)
             url = (body.get("release_notes_url") or "").strip()
-            category = (body.get("category") or "Security").strip()
-            description = (body.get("description") or "").strip()
+            category = html.escape((body.get("category") or "Security").strip(), quote=True)
+            description = html.escape((body.get("description") or "").strip(), quote=True)
             snapshot_date = (body.get("snapshot_date") or "2026-06-01").strip()
             enabled = bool(body.get("enabled", True))
 
             if not slug or not name or not url:
                 self._send_json(
                     {"error": "slug, name, release_notes_url은 필수 항목입니다."},
+                    status=400,
+                )
+                return
+
+            if not re.match(r"^[a-z0-9_-]+$", slug):
+                self._send_json(
+                    {"error": "유효하지 않은 slug 형식입니다."},
+                    status=400,
+                )
+                return
+
+            if not re.match(r"^\d{4}-\d{2}-\d{2}$", snapshot_date):
+                self._send_json(
+                    {"error": "유효하지 않은 snapshot_date 형식(YYYY-MM-DD)입니다."},
                     status=400,
                 )
                 return
