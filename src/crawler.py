@@ -1,6 +1,7 @@
 import hashlib
 import html
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Tuple
@@ -381,10 +382,17 @@ class GCPSecurityReleaseCrawler:
         self, override_baseline_date: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         products = self.db.get_products(enabled_only=True)
-        results = []
-        for prod in products:
-            res = self.crawl_product(
-                prod["slug"], override_baseline_date=override_baseline_date
-            )
-            results.append(res)
-        return results
+        if not products:
+            return []
+
+        max_workers = min(8, len(products))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(
+                    self.crawl_product,
+                    prod["slug"],
+                    override_baseline_date=override_baseline_date,
+                )
+                for prod in products
+            ]
+            return [fut.result() for fut in futures]

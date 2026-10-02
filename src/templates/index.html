@@ -248,6 +248,8 @@
         btnAll: 'All',
         btnRecentWeek: (days) => `Last ${days} Days`,
         searchPlaceholder: 'Search features, keywords (e.g., AI, MCP, GKE)...',
+        loadingReleases: 'Loading release notes...',
+        bootstrappingReleases: 'Scanning official GCP Security release notes for the first time... Results will appear automatically.',
         emptyReleases: (filter) => `No release notes found matching the selected filter (${filter}).`,
         dateGroupCount: (n) => `${n} update${n === 1 ? '' : 's'}`,
         deprecatedNotice: '(Deprecation Notice)',
@@ -287,6 +289,8 @@
         btnAll: '전체',
         btnRecentWeek: (days) => `최근 ${days}일 이내`,
         searchPlaceholder: '기능, 키워드(예: AI, MCP, GKE) 검색...',
+        loadingReleases: '릴리즈 노트를 불러오는 중입니다...',
+        bootstrappingReleases: '최초 실행으로 GCP 보안 제품 공식 릴리즈 노트를 수집하고 있습니다... 잠시 후 자동으로 표시됩니다.',
         emptyReleases: (filter) => `선택한 조건(${filter})에 해당하는 릴리즈 노트가 없습니다.`,
         dateGroupCount: (n) => `${n}건의 업데이트`,
         deprecatedNotice: '(지원 중단 안내)',
@@ -332,6 +336,10 @@
       server_date: null
     };
     let searchTimer = null;
+    let isLoadingReleases = true;
+    let isServerBootstrapping = false;
+    let bootstrapPollTimer = null;
+    let bootstrapPollCount = 0;
 
     function t() {
       return I18N[currentLang] || I18N.en;
@@ -462,8 +470,8 @@
     async function checkCurrentUserAndSettings() {
       try {
         const [meRes, settingsRes] = await Promise.all([
-          fetch('/api/me' + window.location.search),
-          fetch('/api/settings')
+          fetch('/api/me' + window.location.search, { cache: 'no-store' }),
+          fetch('/api/settings', { cache: 'no-store' })
         ]);
         const meData = await meRes.json();
         const settingsData = await settingsRes.json();
@@ -480,6 +488,9 @@
 
         if (settingsData && settingsData.settings) {
           adminSettings = settingsData.settings;
+          if (settingsData.settings.bootstrapping) {
+            isServerBootstrapping = true;
+          }
         }
         applyStaticTranslations();
       } catch (e) {
@@ -488,17 +499,47 @@
       }
     }
 
-    async function loadDashboard() {
+    function scheduleBootstrapPollIfNeeded() {
+      if (bootstrapPollTimer) {
+        clearTimeout(bootstrapPollTimer);
+        bootstrapPollTimer = null;
+      }
+      if (isServerBootstrapping && bootstrapPollCount < 15) {
+        bootstrapPollCount += 1;
+        bootstrapPollTimer = setTimeout(() => {
+          loadDashboard(true);
+        }, 2000);
+      } else {
+        bootstrapPollCount = 0;
+      }
+    }
+
+    async function loadDashboard(isPoll = false) {
       applyStaticTranslations();
-      await checkCurrentUserAndSettings();
-      await Promise.all([loadProducts(), loadReleases()]);
+      if (!isPoll && allProductReleasesCache.length === 0) {
+        isLoadingReleases = true;
+        renderReleasesFeed();
+      }
+      await Promise.all([
+        checkCurrentUserAndSettings(),
+        loadProducts(),
+        loadReleases()
+      ]);
+      renderProductsList();
+      renderReleasesFeed();
+      scheduleBootstrapPollIfNeeded();
     }
 
     async function loadProducts() {
-      const res = await fetch('/api/products');
-      const data = await res.json();
-      productsCache = data.products || [];
-      renderProductsList();
+      try {
+        const res = await fetch('/api/products', { cache: 'no-store' });
+        const data = await res.json();
+        productsCache = data.products || [];
+        isServerBootstrapping = Boolean(data.bootstrapping);
+        renderProductsList();
+      } catch (e) {
+        console.error('Failed to load products:', e);
+      }
     }
 
     function renderProductsList() {
@@ -571,9 +612,10 @@
         formatScanDate(rawScanTimestamp) || '-';
     }
 
-    function selectProduct(slug) {
+    async function selectProduct(slug) {
       currentProductSlug = slug;
-      loadDashboard();
+      renderProductsList();
+      await Promise.all([loadProducts(), loadReleases()]);
     }
 
     function setReleaseType(type) {
@@ -603,16 +645,25 @@
     }
 
     async function loadReleases() {
-      const q = document.getElementById('inputSearch').value.trim();
-      const params = new URLSearchParams({
-        product: currentProductSlug,
-        type: 'all',
-        q: q
-      });
-      const res = await fetch(`/api/releases?${params.toString()}`);
-      const data = await res.json();
-      allProductReleasesCache = data.releases || [];
-      renderReleasesFeed();
+      try {
+        const q = document.getElementById('inputSearch').value.trim();
+        const params = new URLSearchParams({
+          product: currentProductSlug,
+          type: 'all',
+          q: q
+        });
+        const res = await fetch(`/api/releases?${params.toString()}`, { cache: 'no-store' });
+        const data = await res.json();
+        allProductReleasesCache = data.releases || [];
+        if (data.bootstrapping !== undefined) {
+          isServerBootstrapping = Boolean(data.bootstrapping);
+        }
+      } catch (e) {
+        console.error('Failed to load releases:', e);
+      } finally {
+        isLoadingReleases = false;
+        renderReleasesFeed();
+      }
     }
 
     function renderReleasesFeed() {
@@ -670,9 +721,18 @@
 
       const container = document.getElementById('releasesContainer');
       if (items.length === 0) {
+        const totalAcrossProducts = productsCache.reduce((acc, p) => acc + (p.total_releases || 0), 0);
+        const showLoadingState = isLoadingReleases || isServerBootstrapping || (productsCache.length > 0 && totalAcrossProducts === 0);
+        const statusMsg = isServerBootstrapping || (productsCache.length > 0 && totalAcrossProducts === 0 && !isLoadingReleases)
+          ? dict.bootstrappingReleases
+          : (isLoadingReleases ? dict.loadingReleases : dict.emptyReleases(currentReleaseType));
+
         container.innerHTML = `
           <div class="bg-white rounded-xl border border-slate-200 p-12 text-center space-y-3">
-            <div class="text-slate-400 text-sm">${dict.emptyReleases(currentReleaseType)}</div>
+            ${showLoadingState ? `
+              <div class="inline-block w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto"></div>
+            ` : ''}
+            <div class="text-slate-500 text-sm font-medium">${statusMsg}</div>
           </div>
         `;
         return;

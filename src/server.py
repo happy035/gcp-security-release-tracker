@@ -88,6 +88,15 @@ class AutoUpdateScheduler:
 class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
     db: ReleaseDatabase = ReleaseDatabase()
     crawler: GCPSecurityReleaseCrawler = GCPSecurityReleaseCrawler(db)
+    bootstrap_lock: threading.Lock = threading.Lock()
+    bootstrap_done_event: threading.Event = threading.Event()
+    is_bootstrapping: bool = False
+
+    def _wait_if_bootstrapping(self, timeout: float = 25.0) -> bool:
+        """If an initial empty-DB bootstrap is currently running, wait for it; never trigger a crawl on GET."""
+        if self.is_bootstrapping and not self.bootstrap_done_event.is_set():
+            self.bootstrap_done_event.wait(timeout=timeout)
+        return self.is_bootstrapping
 
     def _send_json(
         self,
@@ -98,6 +107,8 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
         raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
         self.send_header("Content-Length", str(len(raw)))
         if extra_headers:
             for k, v in extra_headers:
@@ -114,6 +125,7 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
         raw = html_content.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
         self.send_header("Content-Length", str(len(raw)))
         if extra_headers:
             for k, v in extra_headers:
@@ -136,6 +148,7 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
         )
         settings["server_date"] = now.strftime("%Y-%m-%d")
         settings["server_time"] = now.strftime("%Y-%m-%d %H:%M:%S")
+        settings["bootstrapping"] = self.is_bootstrapping
         return settings
 
     def do_GET(self) -> None:
@@ -177,15 +190,17 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"settings": self._build_settings_response()})
             return
 
-        # 5. Products list
+        # 5. Products list (reads directly from DB)
         if path == "/api/products":
+            bootstrapping = self._wait_if_bootstrapping()
             enabled_only = qs.get("enabled_only", ["false"])[0].lower() == "true"
             products = self.db.get_products(enabled_only=enabled_only)
-            self._send_json({"products": products})
+            self._send_json({"products": products, "bootstrapping": bootstrapping})
             return
 
-        # 6. Releases list
+        # 6. Releases list (reads directly from DB)
         if path == "/api/releases":
+            bootstrapping = self._wait_if_bootstrapping()
             product_slug = qs.get("product", [None])[0]
             release_type = qs.get("type", [None])[0]
             since_date = qs.get("since", [None])[0]
@@ -201,14 +216,21 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
                 search_query=search_query,
                 limit=limit,
             )
-            self._send_json({"count": len(releases), "releases": releases})
+            self._send_json(
+                {
+                    "count": len(releases),
+                    "releases": releases,
+                    "bootstrapping": bootstrapping,
+                }
+            )
             return
 
-        # 7. Snapshots list
+        # 7. Snapshots list (reads directly from DB)
         if path == "/api/snapshots":
+            bootstrapping = self._wait_if_bootstrapping()
             product_slug = qs.get("product", [None])[0]
             snapshots = self.db.get_snapshots(product_slug=product_slug)
-            self._send_json({"snapshots": snapshots})
+            self._send_json({"snapshots": snapshots, "bootstrapping": bootstrapping})
             return
 
         # 8. Logout fallback
@@ -231,9 +253,17 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
 
         # DB Reset and Crawl
         if path == "/api/reset-and-crawl":
-            synced = self.db.reset_all_data()
-            results = self.crawler.crawl_all_enabled()
-            total_inserted = sum(int(r.get("inserted_count", 0)) for r in results)
+            cls = self.__class__
+            with cls.bootstrap_lock:
+                cls.is_bootstrapping = True
+                cls.bootstrap_done_event.clear()
+            try:
+                synced = self.db.reset_all_data()
+                results = self.crawler.crawl_all_enabled()
+                total_inserted = sum(int(r.get("inserted_count", 0)) for r in results)
+            finally:
+                cls.is_bootstrapping = False
+                cls.bootstrap_done_event.set()
             self._send_json(
                 {
                     "status": "RESET_AND_CRAWLED",
@@ -363,19 +393,27 @@ def run_server(host: str = "127.0.0.1", port: int = 8080, db: Optional[ReleaseDa
     ReleaseTrackerHTTPRequestHandler.db = database
     ReleaseTrackerHTTPRequestHandler.crawler = crawler
 
-    # If the database is empty (e.g., fresh Cloud Run deployment), run initial reset & crawl in background
+    # Serve existing DB records immediately; only run one-time bootstrap if DB is completely empty
     if len(database.get_release_notes(limit=1)) == 0:
+        ReleaseTrackerHTTPRequestHandler.is_bootstrapping = True
+        ReleaseTrackerHTTPRequestHandler.bootstrap_done_event.clear()
+
         def _initial_bootstrap() -> None:
             try:
-                print("🔄 [초기 부트스트랩] DB 초기화 및 전체 제품 초기 스캔을 시작합니다...")
-                database.reset_all_data()
+                print("🔄 [초기 부트스트랩] DB가 비어 있어 초기 스캔을 1회 수행합니다...")
                 results = crawler.crawl_all_enabled()
                 inserted = sum(int(r.get("inserted_count", 0)) for r in results)
                 print(f"✅ [초기 부트스트랩] 완료: 총 {len(results)}개 제품 스캔, 신규 {inserted}건 저장")
             except Exception as exc:
                 print(f"⚠️ [초기 부트스트랩] 오류: {exc}")
+            finally:
+                ReleaseTrackerHTTPRequestHandler.is_bootstrapping = False
+                ReleaseTrackerHTTPRequestHandler.bootstrap_done_event.set()
 
         threading.Thread(target=_initial_bootstrap, name="InitialBootstrap", daemon=True).start()
+    else:
+        ReleaseTrackerHTTPRequestHandler.is_bootstrapping = False
+        ReleaseTrackerHTTPRequestHandler.bootstrap_done_event.set()
 
     scheduler = AutoUpdateScheduler(database, crawler)
     scheduler.start()

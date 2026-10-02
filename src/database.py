@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -19,17 +20,19 @@ class ReleaseDatabase:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = Path(db_path) if db_path else DEFAULT_DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_lock = threading.RLock()
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
-        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA busy_timeout = 30000;")
         return conn
 
     def _init_schema(self) -> None:
-        with self._connect() as conn:
+        with self._write_lock, self._connect() as conn:
+            conn.execute("PRAGMA journal_mode = WAL;")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS products (
@@ -120,7 +123,6 @@ class ReleaseDatabase:
 
     def get_admin_settings(self) -> Dict[str, Any]:
         with self._connect() as conn:
-            self._ensure_default_settings(conn)
             rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
             raw = {r["key"]: r["value"] for r in rows}
 
@@ -149,7 +151,7 @@ class ReleaseDatabase:
         if recent_highlight_days is not None:
             updates["recent_highlight_days"] = str(max(1, int(recent_highlight_days)))
 
-        with self._connect() as conn:
+        with self._write_lock, self._connect() as conn:
             self._ensure_default_settings(conn)
             for k, v in updates.items():
                 conn.execute(
@@ -184,7 +186,7 @@ class ReleaseDatabase:
 
     def record_scheduled_run(self, run_date: str, status: str = "SUCCESS") -> None:
         now = utc_now_iso()
-        with self._connect() as conn:
+        with self._write_lock, self._connect() as conn:
             for k, v in (
                 ("last_scheduled_run_at", now),
                 ("last_scheduled_run_date", run_date),
@@ -201,7 +203,7 @@ class ReleaseDatabase:
 
     def reset_all_data(self, config_path: Optional[Path] = None) -> int:
         """Clear all release_notes, crawl_snapshots, and products tables, then re-sync from config/products.json."""
-        with self._connect() as conn:
+        with self._write_lock, self._connect() as conn:
             conn.execute("DELETE FROM release_notes;")
             conn.execute("DELETE FROM crawl_snapshots;")
             conn.execute("DELETE FROM products;")
@@ -223,7 +225,7 @@ class ReleaseDatabase:
         now = utc_now_iso()
         synced = 0
 
-        with self._connect() as conn:
+        with self._write_lock, self._connect() as conn:
             self._ensure_default_settings(conn)
             for item in products:
                 slug = item["slug"].strip()
@@ -288,7 +290,7 @@ class ReleaseDatabase:
         enabled: bool = True,
     ) -> Dict[str, Any]:
         now = utc_now_iso()
-        with self._connect() as conn:
+        with self._write_lock, self._connect() as conn:
             existing = conn.execute(
                 "SELECT id FROM products WHERE slug = ?", (slug,)
             ).fetchone()
@@ -378,7 +380,7 @@ class ReleaseDatabase:
     ) -> Optional[Dict[str, Any]]:
         """Update the snapshot baseline date for a product (optionally pruning releases after that date for re-scan testing)."""
         now = utc_now_iso()
-        with self._connect() as conn:
+        with self._write_lock, self._connect() as conn:
             prod = conn.execute(
                 "SELECT id FROM products WHERE slug = ?", (slug,)
             ).fetchone()
@@ -418,7 +420,7 @@ class ReleaseDatabase:
         inserted_count = 0
         updated_count = 0
 
-        with self._connect() as conn:
+        with self._write_lock, self._connect() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO crawl_snapshots (

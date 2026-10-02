@@ -536,11 +536,17 @@
       document.getElementById('i18nAdminHeaderTitle').textContent = dict.headerTitle;
       document.getElementById('i18nAdminHeaderSub').textContent = dict.headerSub;
       document.getElementById('i18nBtnBackMain').textContent = dict.btnBackMain;
-      document.getElementById('i18nBtnLogout').textContent = dict.btnLogout;
-      document.getElementById('authSourceText').textContent = dict.authLabel(
-        currentUserData.auth_source || 'gcp_auth',
-        currentUserData.email || 'dragon@jayseo.altostrat.com'
-      );
+      const logoutBtnEl = document.getElementById('i18nBtnLogout');
+      if (logoutBtnEl) {
+        logoutBtnEl.textContent = dict.btnLogout;
+      }
+      const authSourceEl = document.getElementById('authSourceText');
+      if (authSourceEl) {
+        authSourceEl.textContent = dict.authLabel(
+          currentUserData.auth_source || 'gcp_auth',
+          currentUserData.email || 'dragon@jayseo.altostrat.com'
+        );
+      }
 
       document.getElementById('i18nMenu3Badge').textContent = dict.menu3Badge;
       document.getElementById('i18nMenu3Title').textContent = dict.menu3Title;
@@ -648,15 +654,18 @@
     }
 
     async function loadCurrentUser() {
-      const res = await fetch('/api/me' + window.location.search);
+      const res = await fetch('/api/me' + window.location.search, { cache: 'no-store' });
       const data = await res.json();
       currentUserData = data || currentUserData;
-      document.getElementById('adminEmailDisplay').textContent = data.email || 'dragon@jayseo.altostrat.com';
+      const adminEmailEl = document.getElementById('adminEmailDisplay');
+      if (adminEmailEl) {
+        adminEmailEl.textContent = data.email || 'dragon@jayseo.altostrat.com';
+      }
       applyAdminTranslations();
     }
 
     async function loadAdminSettings() {
-      const res = await fetch('/api/settings');
+      const res = await fetch('/api/settings', { cache: 'no-store' });
       const data = await res.json();
       adminSettings = data.settings || {};
 
@@ -694,7 +703,7 @@
     }
 
     async function loadAdminProducts() {
-      const res = await fetch('/api/products');
+      const res = await fetch('/api/products', { cache: 'no-store' });
       const data = await res.json();
       productsCache = data.products || [];
       renderAdminProductsUI();
@@ -892,7 +901,7 @@
 
     async function loadAdminSnapshots() {
       const productSlug = document.getElementById('historyFilterProduct').value || 'all';
-      const res = await fetch(`/api/snapshots?product=${productSlug}`);
+      const res = await fetch(`/api/snapshots?product=${productSlug}`, { cache: 'no-store' });
       const data = await res.json();
       snapshotsCache = data.snapshots || [];
       renderAdminSnapshotsUI();
