@@ -202,7 +202,6 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
                     "is_admin": email in allowed_admins,
                     "is_viewer": True,
                     "auth_source": "gcp_iap",
-                    "allowed_admins": allowed_admins,
                 }
 
         # 2. Other GCP / reverse-proxy headers
@@ -215,7 +214,6 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
                     "is_admin": email in allowed_admins,
                     "is_viewer": True,
                     "auth_source": "gcp_identity_platform",
-                    "allowed_admins": allowed_admins,
                 }
 
         # 3. Authorization Bearer header
@@ -228,7 +226,6 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
                     "is_admin": token in allowed_admins,
                     "is_viewer": True,
                     "auth_source": "bearer_token",
-                    "allowed_admins": allowed_admins,
                 }
 
         # 4. Session Cookies
@@ -241,7 +238,6 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
                     "is_admin": cookie_val in allowed_admins,
                     "is_viewer": True,
                     "auth_source": "session_cookie",
-                    "allowed_admins": allowed_admins,
                 }
 
         # 5. Unauthenticated
@@ -250,7 +246,6 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
             "is_admin": False,
             "is_viewer": True,
             "auth_source": "none",
-            "allowed_admins": allowed_admins,
         }
 
     def _require_admin(self) -> bool:
@@ -311,7 +306,14 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
         # 3. User metadata endpoint
         if path == "/api/me":
             user = self._get_authenticated_user()
-            self._send_json(user)
+            self._send_json(
+                {
+                    "email": user.get("email"),
+                    "is_admin": user.get("is_admin", False),
+                    "is_viewer": user.get("is_viewer", True),
+                    "auth_source": user.get("auth_source", "none"),
+                }
+            )
             return
 
         # 4. Settings
