@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title id="pageTitle">GCP Security Release Notes Tracker</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     body {
@@ -341,6 +342,26 @@
     let bootstrapPollTimer = null;
     let bootstrapPollCount = 0;
 
+    function escapeHtml(str) {
+      if (str == null) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function sanitizeHtml(htmlContent) {
+      if (!htmlContent) return '';
+      if (typeof DOMPurify !== 'undefined' && DOMPurify.sanitize) {
+        return DOMPurify.sanitize(htmlContent, {
+          ADD_ATTR: ['target', 'rel']
+        });
+      }
+      return escapeHtml(htmlContent);
+    }
+
     function t() {
       return I18N[currentLang] || I18N.en;
     }
@@ -572,19 +593,24 @@
           : '';
         const nameColorClass = hasRecentWeekUpdate ? 'text-rose-700 font-bold' : 'text-slate-900 font-semibold';
 
+        const safeSlug = escapeHtml(p.slug);
+        const safeName = escapeHtml(p.name);
+        const safeCategory = escapeHtml(p.category || 'Security');
+        const safeLatestRelDate = escapeHtml(p.latest_release_date || '');
+
         html += `
           <div class="px-4 py-3 transition ${isSelected ? 'bg-blue-50/80 border-l-4 border-blue-600' : 'hover:bg-slate-50'}">
-            <div class="flex items-start justify-between cursor-pointer" onclick="selectProduct('${p.slug}')">
+            <div class="flex items-start justify-between cursor-pointer" onclick="selectProduct('${safeSlug}')">
               <div class="space-y-0.5 pr-2">
                 <div class="flex flex-wrap items-center gap-1.5">
                   ${enabledBadge}
-                  <span class="text-sm ${nameColorClass}">${p.name}</span>
+                  <span class="text-sm ${nameColorClass}">${safeName}</span>
                   ${recentProductPill}
                 </div>
-                <div class="text-xs text-slate-500">${p.category || 'Security'}</div>
+                <div class="text-xs text-slate-500">${safeCategory}</div>
                 <div class="text-[11px] text-slate-400">
                   ${dict.lastScanLabel}: <strong class="text-slate-600">${lastScanDate || '-'}</strong>
-                  ${p.latest_release_date ? ` · ${dict.latestReleaseLabel}: <span class="${hasRecentWeekUpdate ? 'text-rose-600 font-semibold' : 'text-slate-500'}">${p.latest_release_date}</span>` : ''}
+                  ${p.latest_release_date ? ` · ${dict.latestReleaseLabel}: <span class="${hasRecentWeekUpdate ? 'text-rose-600 font-semibold' : 'text-slate-500'}">${safeLatestRelDate}</span>` : ''}
                 </div>
               </div>
               <span class="text-xs font-bold px-2 py-0.5 rounded-full ${isSelected ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700'}">
@@ -771,10 +797,14 @@
           const isItemRecent = isWithinRecentDays(item.release_date);
           const daysAgoText = isItemRecent ? getDaysAgoLabel(item.release_date) : '';
 
+          const safeProductName = escapeHtml(item.product_name);
+          const safeSourceUrl = escapeHtml(item.source_url);
+          const safeContentHtml = sanitizeHtml(item.content_html);
+
           const linksHtml = (item.links || []).slice(0, 4).map(l => `
-            <a href="${l.url}" target="_blank" rel="noopener"
+            <a href="${escapeHtml(l.url)}" target="_blank" rel="noopener"
               class="inline-flex items-center gap-1 text-xs font-medium text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 px-2.5 py-1 rounded-md transition">
-              <span>🔗 ${l.title}</span>
+              <span>🔗 ${escapeHtml(l.title)}</span>
             </a>
           `).join('');
 
@@ -799,7 +829,7 @@
                     ⚠️ ${normCategory}
                   </span>
                   <span class="text-xs sm:text-sm font-bold text-white">
-                    ${item.product_name}
+                    ${safeProductName}
                   </span>
                   <span class="text-[11px] font-medium text-blue-200">
                     ${dict.deprecatedNotice}
@@ -810,7 +840,7 @@
                     </span>
                   ` : ''}
                 </div>
-                <a href="${item.source_url}" target="_blank" rel="noopener"
+                <a href="${safeSourceUrl}" target="_blank" rel="noopener"
                   class="text-xs text-blue-200 hover:text-white flex items-center gap-1 font-medium">
                   <span>${dict.viewSource}</span>
                 </a>
@@ -825,13 +855,13 @@
                     🔥 ${normCategory}
                   </span>
                   <span class="text-xs sm:text-sm font-bold text-white">
-                    ${item.product_name}
+                    ${safeProductName}
                   </span>
                   <span class="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold bg-black/20 text-white rounded-md">
                     ✨ ${dict.recentItemBadge(daysLimit, daysAgoText)}
                   </span>
                 </div>
-                <a href="${item.source_url}" target="_blank" rel="noopener"
+                <a href="${safeSourceUrl}" target="_blank" rel="noopener"
                   class="text-xs text-rose-100 hover:text-white flex items-center gap-1 font-medium">
                   <span>${dict.viewSource}</span>
                 </a>
@@ -846,10 +876,10 @@
                     ${normCategory}
                   </span>
                   <span class="text-xs font-semibold text-slate-700 bg-slate-100 px-2.5 py-0.5 rounded">
-                    ${item.product_name}
+                    ${safeProductName}
                   </span>
                 </div>
-                <a href="${item.source_url}" target="_blank" rel="noopener"
+                <a href="${safeSourceUrl}" target="_blank" rel="noopener"
                   class="text-xs text-slate-400 hover:text-blue-600 flex items-center gap-1">
                   <span>${dict.viewSource}</span>
                 </a>
@@ -863,7 +893,7 @@
 
               <!-- Release Note Content -->
               <div class="release-html ${contentToneClass} text-sm text-slate-700 pl-0.5">
-                ${item.content_html}
+                ${safeContentHtml}
               </div>
 
               ${linksHtml ? `<div class="pt-1 flex flex-wrap gap-1.5">${linksHtml}</div>` : ''}

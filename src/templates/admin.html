@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title id="adminPageTitle">Admin Console - GCP Security Release Tracker</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     body {
@@ -516,6 +517,26 @@
     let adminSettings = {};
     let currentUserData = { email: 'dragon@jayseo.altostrat.com', auth_source: 'gcp_identity_platform' };
 
+    function escapeHtml(str) {
+      if (str == null) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function sanitizeHtml(htmlContent) {
+      if (!htmlContent) return '';
+      if (typeof DOMPurify !== 'undefined' && DOMPurify.sanitize) {
+        return DOMPurify.sanitize(htmlContent, {
+          ADD_ATTR: ['target', 'rel']
+        });
+      }
+      return escapeHtml(htmlContent);
+    }
+
     function t() {
       return ADMIN_I18N[currentLang] || ADMIN_I18N.en;
     }
@@ -722,22 +743,30 @@
       const prevHistVal = histSel.value || 'all';
 
       scanSel.innerHTML = `<option value="all">${dict.scanAllOption}</option>` +
-        productsCache.map(p => `<option value="${p.slug}">${p.name} (${p.slug})</option>`).join('');
+        productsCache.map(p => `<option value="${escapeHtml(p.slug)}">${escapeHtml(p.name)} (${escapeHtml(p.slug)})</option>`).join('');
       scanSel.value = prevScanVal;
 
-      ctrlSel.innerHTML = productsCache.map(p => `<option value="${p.slug}">${p.name} (${p.slug})</option>`).join('');
+      ctrlSel.innerHTML = productsCache.map(p => `<option value="${escapeHtml(p.slug)}">${escapeHtml(p.name)} (${escapeHtml(p.slug)})</option>`).join('');
       if (prevCtrlVal && productsCache.some(p => p.slug === prevCtrlVal)) {
         ctrlSel.value = prevCtrlVal;
       }
 
       histSel.innerHTML = `<option value="all">${dict.historyAllOption}</option>` +
-        productsCache.map(p => `<option value="${p.slug}">${p.name}</option>`).join('');
+        productsCache.map(p => `<option value="${escapeHtml(p.slug)}">${escapeHtml(p.name)}</option>`).join('');
       histSel.value = prevHistVal;
 
       onControlProductChange();
 
       const tbody = document.getElementById('adminProductsTableBody');
-      tbody.innerHTML = productsCache.map(p => `
+      tbody.innerHTML = productsCache.map(p => {
+        const safeSlug = escapeHtml(p.slug);
+        const safeName = escapeHtml(p.name);
+        const safeUrl = escapeHtml(p.release_notes_url);
+        const safeSnapshotDate = escapeHtml(p.snapshot_date);
+        const safeLatestRelDate = escapeHtml(p.latest_release_date || '-');
+        const safeLastCrawled = escapeHtml((p.last_crawled_at || '-').replace('T', ' ').replace('Z', ''));
+
+        return `
         <tr class="hover:bg-slate-50">
           <td class="py-3 px-4">
             <span class="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold rounded-full ${p.enabled ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-500'}">
@@ -745,28 +774,29 @@
             </span>
           </td>
           <td class="py-3 px-4">
-            <div class="font-semibold text-slate-900">${p.name}</div>
-            <div class="text-[11px] text-slate-400">${p.slug} · <a href="${p.release_notes_url}" target="_blank" class="text-blue-600 hover:underline">${dict.sourceLink}</a></div>
+            <div class="font-semibold text-slate-900">${safeName}</div>
+            <div class="text-[11px] text-slate-400">${safeSlug} · <a href="${safeUrl}" target="_blank" class="text-blue-600 hover:underline">${dict.sourceLink}</a></div>
           </td>
-          <td class="py-3 px-4 font-mono font-semibold text-blue-700">${p.snapshot_date}</td>
-          <td class="py-3 px-4 font-mono text-slate-700">${p.latest_release_date || '-'}</td>
+          <td class="py-3 px-4 font-mono font-semibold text-blue-700">${safeSnapshotDate}</td>
+          <td class="py-3 px-4 font-mono text-slate-700">${safeLatestRelDate}</td>
           <td class="py-3 px-4">
             <span class="font-bold text-slate-900">${dict.itemsUnit(p.total_releases || 0)}</span>
             <span class="text-xs text-emerald-600 ml-1">(Feature ${p.feature_count || 0})</span>
           </td>
-          <td class="py-3 px-4 text-xs text-slate-500">${(p.last_crawled_at || '-').replace('T', ' ').replace('Z', '')}</td>
+          <td class="py-3 px-4 text-xs text-slate-500">${safeLastCrawled}</td>
           <td class="py-3 px-4 text-right space-x-1">
-            <button onclick="selectProductForControl('${p.slug}')"
+            <button onclick="selectProductForControl('${safeSlug}')"
               class="px-2.5 py-1 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition">
               ${dict.btnSelectBaseline}
             </button>
-            <button onclick="triggerSingleProductCrawl('${p.slug}')"
+            <button onclick="triggerSingleProductCrawl('${safeSlug}')"
               class="px-2.5 py-1 text-xs font-semibold bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg transition">
               ${dict.btnScanNow}
             </button>
           </td>
         </tr>
-      `).join('');
+      `;
+      }).join('');
     }
 
     function onControlProductChange() {
@@ -920,27 +950,38 @@
         return;
       }
 
-      tbody.innerHTML = snapshotsCache.map(s => `
+      tbody.innerHTML = snapshotsCache.map(s => {
+        const safeId = escapeHtml(s.id);
+        const safeStatus = escapeHtml(s.status);
+        const safeProductName = escapeHtml(s.product_name);
+        const safeBaselineDate = escapeHtml(s.baseline_date);
+        const safeNewSnapshotDate = escapeHtml(s.new_snapshot_date);
+        const safeCrawledAt = escapeHtml((s.crawled_at || '').replace('T', ' ').replace('Z', ''));
+        const safeMessage = escapeHtml(s.message || '-');
+        const safeMessageAttr = escapeHtml(s.message || '');
+
+        return `
         <tr class="hover:bg-slate-50">
-          <td class="py-3 px-4 font-mono text-xs text-slate-400">#${s.id}</td>
+          <td class="py-3 px-4 font-mono text-xs text-slate-400">#${safeId}</td>
           <td class="py-3 px-4">
             <span class="px-2 py-0.5 text-[11px] font-bold rounded ${s.status === 'SUCCESS' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}">
-              ${s.status}
+              ${safeStatus}
             </span>
           </td>
-          <td class="py-3 px-4 font-semibold text-slate-800">${s.product_name}</td>
+          <td class="py-3 px-4 font-semibold text-slate-800">${safeProductName}</td>
           <td class="py-3 px-4 font-mono text-xs">
-            <span class="text-slate-600">${s.baseline_date}</span>
+            <span class="text-slate-600">${safeBaselineDate}</span>
             <span class="text-slate-400 mx-1">→</span>
-            <strong class="text-blue-700">${s.new_snapshot_date}</strong>
+            <strong class="text-blue-700">${safeNewSnapshotDate}</strong>
           </td>
           <td class="py-3 px-4 text-xs">
-            ${dict.histStatsCell(s.scanned_count, s.inserted_count, s.updated_count)}
+            ${dict.histStatsCell(Number(s.scanned_count) || 0, Number(s.inserted_count) || 0, Number(s.updated_count) || 0)}
           </td>
-          <td class="py-3 px-4 font-mono text-xs text-slate-500">${(s.crawled_at || '').replace('T', ' ').replace('Z', '')}</td>
-          <td class="py-3 px-4 text-xs text-slate-500 max-w-xs truncate" title="${s.message || ''}">${s.message || '-'}</td>
+          <td class="py-3 px-4 font-mono text-xs text-slate-500">${safeCrawledAt}</td>
+          <td class="py-3 px-4 text-xs text-slate-500 max-w-xs truncate" title="${safeMessageAttr}">${safeMessage}</td>
         </tr>
-      `).join('');
+      `;
+      }).join('');
     }
 
     window.addEventListener('DOMContentLoaded', initAdminConsole);
