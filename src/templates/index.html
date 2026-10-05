@@ -102,13 +102,6 @@
             KO
           </button>
         </div>
-
-        <!-- Admin Console Link -->
-        <a id="adminConsoleLink" href="/admin"
-          class="inline-flex px-3.5 py-1.5 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/40 rounded-lg shadow transition items-center gap-1.5"
-          title="Admin Console (dragon@jayseo.altostrat.com only)">
-          <span id="adminConsoleLinkText">🔐 Admin Console (/admin)</span>
-        </a>
       </div>
     </div>
   </header>
@@ -225,8 +218,6 @@
         appSubtitle: 'Official release notes & recent 7-day updates dashboard for Google Cloud Security products',
         scheduleActive: (time) => `Auto-update daily at ${time}`,
         schedulePaused: 'Auto-update paused',
-        adminConsoleBtn: '🔐 Admin Console (/admin)',
-        adminConsoleAuthBtn: (email) => `⚙️ Admin Console (${email})`,
         productListHeader: 'GCP Security Products',
         productCountSuffix: (n) => `${n} products`,
         allProductsTitle: 'View All Security Products',
@@ -257,8 +248,7 @@
         viewSource: 'View Source ↗',
         today: 'Today',
         oneDayAgo: '1 day ago',
-        daysAgo: (n) => `${n} days ago`,
-        signOut: 'Sign Out'
+        daysAgo: (n) => `${n} days ago`
       },
       ko: {
         pageTitle: 'GCP 보안 제품 신규 기능 트래커',
@@ -266,8 +256,6 @@
         appSubtitle: 'Google Cloud 보안 서비스별 공식 릴리즈 노트 및 최근 1주일 신규/변경 내역 대시보드',
         scheduleActive: (time) => `매일 ${time} 자동 업데이트`,
         schedulePaused: '자동 업데이트 중지됨',
-        adminConsoleBtn: '🔐 관리자 콘솔 (/admin)',
-        adminConsoleAuthBtn: (email) => `⚙️ 관리자 콘솔 (${email})`,
         productListHeader: 'GCP 보안 제품 목록',
         productCountSuffix: (n) => `${n}개`,
         allProductsTitle: '전체 보안 제품 보기',
@@ -298,8 +286,7 @@
         viewSource: '원문 보기 ↗',
         today: '오늘',
         oneDayAgo: '1일 전',
-        daysAgo: (n) => `${n}일 전`,
-        signOut: '로그아웃'
+        daysAgo: (n) => `${n}일 전`
       }
     };
 
@@ -328,7 +315,6 @@
     let currentReleaseType = 'all';
     let productsCache = [];
     let allProductReleasesCache = [];
-    let currentUserInfo = { email: 'unauthenticated', is_admin: false };
     let adminSettings = {
       auto_update_enabled: true,
       auto_update_time: '05:00',
@@ -378,18 +364,6 @@
       document.getElementById('headerScheduleText').textContent = adminSettings.auto_update_enabled
         ? dict.scheduleActive(timeStr)
         : dict.schedulePaused;
-
-      const adminLinkText = document.getElementById('adminConsoleLinkText');
-      if (adminLinkText) {
-        adminLinkText.textContent = (currentUserInfo && currentUserInfo.is_admin)
-          ? dict.adminConsoleAuthBtn(currentUserInfo.email)
-          : dict.adminConsoleBtn;
-      }
-
-      const logoutBtn = document.getElementById('logoutBtnLink');
-      if (logoutBtn) {
-        logoutBtn.textContent = dict.signOut;
-      }
 
       const btnEN = document.getElementById('langBtnEN');
       const btnKO = document.getElementById('langBtnKO');
@@ -467,24 +441,10 @@
       return 'bg-slate-100 text-slate-800 border-slate-300';
     }
 
-    async function checkCurrentUserAndSettings() {
+    async function loadSettings() {
       try {
-        const [meRes, settingsRes] = await Promise.all([
-          fetch('/api/me' + window.location.search, { cache: 'no-store' }),
-          fetch('/api/settings', { cache: 'no-store' })
-        ]);
-        const meData = await meRes.json();
+        const settingsRes = await fetch('/api/settings', { cache: 'no-store' });
         const settingsData = await settingsRes.json();
-
-        if (meData) {
-          currentUserInfo = meData;
-        }
-        const adminLink = document.getElementById('adminConsoleLink');
-        if (meData && meData.is_admin) {
-          adminLink.className = 'inline-flex px-3.5 py-1.5 text-xs font-semibold bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-lg shadow transition items-center gap-1.5';
-        } else {
-          adminLink.className = 'inline-flex px-3.5 py-1.5 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/40 rounded-lg shadow transition items-center gap-1.5';
-        }
 
         if (settingsData && settingsData.settings) {
           adminSettings = settingsData.settings;
@@ -494,7 +454,7 @@
         }
         applyStaticTranslations();
       } catch (e) {
-        console.error('Failed to load user/settings:', e);
+        console.error('Failed to load settings:', e);
         applyStaticTranslations();
       }
     }
@@ -521,7 +481,7 @@
         renderReleasesFeed();
       }
       await Promise.all([
-        checkCurrentUserAndSettings(),
+        loadSettings(),
         loadProducts(),
         loadReleases()
       ]);

@@ -1,8 +1,5 @@
 {
   "default_initial_snapshot_date": "2026-06-01",
-  "admin_emails": [
-    "dragon@jayseo.altostrat.com"
-  ],
   "schedule": {
     "auto_update_enabled": true,
     "auto_update_time": "05:00",

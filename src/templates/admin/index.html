@@ -26,7 +26,7 @@
           <h1 class="text-base sm:text-lg font-bold tracking-tight flex items-center gap-2">
             <span id="i18nAdminHeaderTitle">GCP Security Release Tracker · Admin Console</span>
             <span class="text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-400/30 px-2 py-0.5 rounded-full">
-              Admin Only
+              /admin/
             </span>
           </h1>
           <p class="text-xs text-slate-400 hidden sm:block">
@@ -341,10 +341,8 @@
       en: {
         pageTitle: 'Admin Console - GCP Security Release Tracker',
         headerTitle: 'GCP Security Release Tracker · Admin Console',
-        headerSub: 'Authorized Administrator Account',
+        headerSub: 'Security Products & Scheduler Management',
         btnBackMain: '← Main Dashboard',
-        btnLogout: 'Logout',
-        authLabel: (src, email) => `Auth: ${src} (${email})`,
         menu3Badge: 'Menu 3 · On-Demand Crawl',
         menu3Title: 'Scan New Updates Since Snapshot',
         menu3Desc: 'Immediately crawl and store newly published release notes after each active product\'s current <strong>Snapshot Baseline Date</strong>.',
@@ -416,10 +414,8 @@
       ko: {
         pageTitle: '관리자 콘솔 - GCP 보안 제품 릴리즈 트래커',
         headerTitle: 'GCP 보안 제품 릴리즈 트래커 · 관리자 콘솔',
-        headerSub: '인증된 관리자 전용 관리 페이지',
+        headerSub: '보안 제품 및 스케줄러 관리 페이지',
         btnBackMain: '← 사용자 메인 화면',
-        btnLogout: '로그아웃',
-        authLabel: (src, email) => `인증: ${src} (${email})`,
         menu3Badge: '메뉴 3 · 즉시 크롤링',
         menu3Title: '스냅샷 이후 신규 스캔 (On-Demand Crawl)',
         menu3Desc: '등록된 활성 보안 제품들의 현재 <strong>스냅샷 기준일(Snapshot Date)</strong> 이후 게시된 신규 릴리즈 노트를 즉시 크롤링하여 데이터베이스에 반영합니다.',
@@ -514,7 +510,6 @@
     let productsCache = [];
     let snapshotsCache = [];
     let adminSettings = {};
-    let currentUserData = { email: 'dragon@jayseo.altostrat.com', auth_source: 'gcp_identity_platform' };
 
     function t() {
       return ADMIN_I18N[currentLang] || ADMIN_I18N.en;
@@ -536,17 +531,6 @@
       document.getElementById('i18nAdminHeaderTitle').textContent = dict.headerTitle;
       document.getElementById('i18nAdminHeaderSub').textContent = dict.headerSub;
       document.getElementById('i18nBtnBackMain').textContent = dict.btnBackMain;
-      const logoutBtnEl = document.getElementById('i18nBtnLogout');
-      if (logoutBtnEl) {
-        logoutBtnEl.textContent = dict.btnLogout;
-      }
-      const authSourceEl = document.getElementById('authSourceText');
-      if (authSourceEl) {
-        authSourceEl.textContent = dict.authLabel(
-          currentUserData.auth_source || 'gcp_auth',
-          currentUserData.email || 'dragon@jayseo.altostrat.com'
-        );
-      }
 
       document.getElementById('i18nMenu3Badge').textContent = dict.menu3Badge;
       document.getElementById('i18nMenu3Title').textContent = dict.menu3Title;
@@ -630,13 +614,6 @@
       }
     }
 
-    async function logoutAdmin() {
-      try {
-        await fetch('/api/auth/logout', { method: 'POST' });
-      } catch (e) {}
-      window.location.href = '/admin';
-    }
-
     function showToast(message) {
       const toast = document.getElementById('statusToast');
       document.getElementById('statusToastText').textContent = message;
@@ -646,22 +623,10 @@
     async function initAdminConsole() {
       applyAdminTranslations();
       await Promise.all([
-        loadCurrentUser(),
         loadAdminSettings(),
         loadAdminProducts(),
         loadAdminSnapshots()
       ]);
-    }
-
-    async function loadCurrentUser() {
-      const res = await fetch('/api/me' + window.location.search, { cache: 'no-store' });
-      const data = await res.json();
-      currentUserData = data || currentUserData;
-      const adminEmailEl = document.getElementById('adminEmailDisplay');
-      if (adminEmailEl) {
-        adminEmailEl.textContent = data.email || 'dragon@jayseo.altostrat.com';
-      }
-      applyAdminTranslations();
     }
 
     async function loadAdminSettings() {

@@ -14,7 +14,7 @@ from src.database import DEFAULT_CONFIG_PATH, ReleaseDatabase
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 INDEX_TEMPLATE_PATH = TEMPLATE_DIR / "index.html"
-ADMIN_TEMPLATE_PATH = TEMPLATE_DIR / "admin.html"
+ADMIN_TEMPLATE_PATH = TEMPLATE_DIR / "admin" / "index.html"
 
 
 def compute_next_scheduled_run(update_time_str: str, enabled: bool) -> str:
@@ -156,7 +156,7 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
         path = parsed.path
         qs = parse_qs(parsed.query)
 
-        # 1. Main Dashboard: Publicly accessible without any authentication
+        # 1. Main Dashboard
         if path in ("/", "/index.html"):
             if INDEX_TEMPLATE_PATH.exists():
                 self._send_html(INDEX_TEMPLATE_PATH.read_text(encoding="utf-8"))
@@ -164,33 +164,20 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
                 self._send_html("<h1>Template not found</h1>", status=404)
             return
 
-        # 2. Admin Console: Accessible directly without authentication
-        if path in ("/admin", "/admin/"):
+        # 2. Admin Console (/admin/ directory)
+        if path in ("/admin", "/admin/", "/admin/index.html"):
             if ADMIN_TEMPLATE_PATH.exists():
                 self._send_html(ADMIN_TEMPLATE_PATH.read_text(encoding="utf-8"))
             else:
                 self._send_html("<h1>Admin template not found</h1>", status=404)
             return
 
-        # 3. User metadata endpoint
-        if path == "/api/me":
-            self._send_json(
-                {
-                    "email": "public_user",
-                    "is_admin": True,
-                    "is_viewer": True,
-                    "auth_source": "open_access",
-                    "allowed_admins": ["public_user"],
-                }
-            )
-            return
-
-        # 4. Settings
+        # 3. Settings
         if path == "/api/settings":
             self._send_json({"settings": self._build_settings_response()})
             return
 
-        # 5. Products list (reads directly from DB)
+        # 4. Products list (reads directly from DB)
         if path == "/api/products":
             bootstrapping = self._wait_if_bootstrapping()
             enabled_only = qs.get("enabled_only", ["false"])[0].lower() == "true"
@@ -198,7 +185,7 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"products": products, "bootstrapping": bootstrapping})
             return
 
-        # 6. Releases list (reads directly from DB)
+        # 5. Releases list (reads directly from DB)
         if path == "/api/releases":
             bootstrapping = self._wait_if_bootstrapping()
             product_slug = qs.get("product", [None])[0]
@@ -225,7 +212,7 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        # 7. Snapshots list (reads directly from DB)
+        # 6. Snapshots list (reads directly from DB)
         if path == "/api/snapshots":
             bootstrapping = self._wait_if_bootstrapping()
             product_slug = qs.get("product", [None])[0]
@@ -233,23 +220,11 @@ class ReleaseTrackerHTTPRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"snapshots": snapshots, "bootstrapping": bootstrapping})
             return
 
-        # 8. Logout fallback
-        if path == "/api/auth/logout":
-            self.send_response(302)
-            self.send_header("Location", "/")
-            self.end_headers()
-            return
-
         self._send_json({"error": "Not found"}, status=404)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
-
-        # Logout
-        if path == "/api/auth/logout":
-            self._send_json({"message": "로그아웃되었습니다."})
-            return
 
         # DB Reset and Crawl
         if path == "/api/reset-and-crawl":
