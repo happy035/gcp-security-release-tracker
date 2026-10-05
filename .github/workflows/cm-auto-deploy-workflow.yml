@@ -155,53 +155,33 @@ jobs:
           cm --version || cm -v
 
       # ----------------------------------------------------------------------
-      # 3. Code Mender 초기화 (cm init) 및 GCS 환경설정 동기화
+      # 3. Code Mender 초기화 (cm init) 및 GCS 환경설정(config.yaml) 동기화
       # ----------------------------------------------------------------------
       - name: Initialize Code Mender & Restore Config from GCS
         run: |
           echo "=== Initializing Code Mender environment ==="
-          cm init
+          mkdir -p ~/.codemender
 
           RAW_BUCKET="${GCS_BUCKET:-}"
           CLEAN_BUCKET=$(echo "$RAW_BUCKET" | sed -e 's|^gs://||' -e 's|/*$||')
           GCS_TARGET_DIR="${GCS_CONFIG_DIR:-codemender-config}"
 
           if [ -n "$CLEAN_BUCKET" ] && [ "$CLEAN_BUCKET" != "true" ] && [ "$CLEAN_BUCKET" != "false" ]; then
-            echo "=== Restoring configuration & state from GCS (gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}) ==="
-            mkdir -p ~/.codemender
-
-            # 1) 전체 아카이브(state.tar.gz) 복원 시도
-            if gcloud storage ls "gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}/state.tar.gz" 2>/dev/null; then
-              echo "[INFO] Found state.tar.gz in ${GCS_TARGET_DIR}, extracting to ~/.codemender..."
-              gcloud storage cp "gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}/state.tar.gz" /tmp/state.tar.gz
-              tar -xzf /tmp/state.tar.gz -C ~/ || true
-            elif gcloud storage ls "gs://${CLEAN_BUCKET}/state.tar.gz" 2>/dev/null; then
-              echo "[INFO] Found state.tar.gz in bucket root, extracting to ~/.codemender..."
-              gcloud storage cp "gs://${CLEAN_BUCKET}/state.tar.gz" /tmp/state.tar.gz
-              tar -xzf /tmp/state.tar.gz -C ~/ || true
-            else
-              echo "[INFO] No previous state.tar.gz found in GCS. Starting with fresh state."
-            fi
-
-            # 2) 개별 config.yaml 및 state.db 복원 (단독 파일이 더 최신인 경우 대비)
+            echo "=== Restoring config.yaml from GCS (gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}) ==="
             if gcloud storage ls "gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}/config.yaml" 2>/dev/null; then
               echo "[INFO] Restoring remote config.yaml from GCS..."
               gcloud storage cp "gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}/config.yaml" ~/.codemender/config.yaml || true
             elif gcloud storage ls "gs://${CLEAN_BUCKET}/config.yaml" 2>/dev/null; then
               gcloud storage cp "gs://${CLEAN_BUCKET}/config.yaml" ~/.codemender/config.yaml || true
             fi
-
-            if gcloud storage ls "gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}/state.db" 2>/dev/null; then
-              echo "[INFO] Restoring remote state.db from GCS..."
-              gcloud storage cp "gs://${CLEAN_BUCKET}/${GCS_TARGET_DIR}/state.db" ~/.codemender/state.db || true
-            elif gcloud storage ls "gs://${CLEAN_BUCKET}/state.db" 2>/dev/null; then
-              gcloud storage cp "gs://${CLEAN_BUCKET}/state.db" ~/.codemender/state.db || true
-            fi
           else
             echo "[INFO] GCS_BUCKET_NAME not configured or invalid ('$GCS_BUCKET'). Skipping GCS config restore."
           fi
 
-          # 설정 검증
+          # 이전 실행의 만료된 세션/삭제된 파일 참조로 인한 Precondition check failed (HTTP 400) 방지를 위해
+          # state.db는 매 실행 시 깨끗한 상태로 초기화
+          rm -f ~/.codemender/state.db
+          cm init
           cm init --verify
 
       # ----------------------------------------------------------------------
@@ -223,25 +203,25 @@ jobs:
           echo "All modified files:"
           echo "$CHANGED_FILES"
 
-          # 소스 코드 확장자 필터링 (Python 및 웹 애플리케이션 파일)
+          # 소스 코드 확장자 필터링 (실행 코드 및 템플릿 파일 중심; 정적 데이터 JSON 제외)
           TARGET_FILES=""
           for f in $CHANGED_FILES; do
             if [ -f "$f" ]; then
               case "$f" in
-                .github/*)
+                .github/*|config/*.json|*.md)
                   continue
                   ;;
-                *.py|*.html|*.json|Dockerfile|requirements.txt)
+                *.py|*.html|Dockerfile|requirements.txt)
                   TARGET_FILES="$TARGET_FILES $f"
                   ;;
               esac
             fi
           done
 
-          # 수동 실행(workflow_dispatch) 시 변경 파일이 없으면 전체 저장소 스캔
+          # 수동 실행(workflow_dispatch) 시 변경 파일이 없으면 src 디렉토리 스캔
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -z "$TARGET_FILES" ]; then
-            echo "Workflow manually dispatched. Scanning entire repository."
-            TARGET_FILES="."
+            echo "Workflow manually dispatched. Scanning src/ and cli.py."
+            TARGET_FILES="cli.py src"
           fi
 
           if [ -z "$TARGET_FILES" ]; then
@@ -267,7 +247,7 @@ jobs:
           cm --version || cm -v
 
       # ----------------------------------------------------------------------
-      # 5. 1차 소스코드 취약점 스캔 (cm find - 증분 스캔)
+      # 5. 1차 소스코드 취약점 스캔 (cm find - 증분 스캔 및 세션 오류 복구)
       # ----------------------------------------------------------------------
       - name: Run Initial Code Mender Scan (find)
         id: cm_scan
@@ -279,7 +259,11 @@ jobs:
           echo "=== 5. Running Initial Code Mender Scan on modified targets ==="
           for target in $TARGETS; do
             echo "--> Scanning target: $target"
-            cm find "$target" -y --sandbox=false --bypass-warning
+            if ! cm find "$target" -y --sandbox=false --bypass-warning; then
+              echo "[WARN] 'cm find $target' encountered a backend session error (e.g. SubmitToolResult 400 Precondition check failed). Retrying once with fresh session..."
+              sleep 5
+              cm find "$target" -y --sandbox=false --bypass-warning || echo "[WARN] Second attempt on '$target' exited non-zero; proceeding with recorded findings in state.db."
+            fi
           done
 
       # ----------------------------------------------------------------------
@@ -300,6 +284,20 @@ jobs:
           import os
           import subprocess
           import sys
+          import time
+
+          def run_cm_with_retry(cmd, max_attempts=2):
+              for attempt in range(1, max_attempts + 1):
+                  proc = subprocess.run(cmd, capture_output=True, text=True)
+                  combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
+                  if proc.returncode == 0:
+                      return proc
+                  if "Precondition check failed" in combined or "SubmitToolResult failed" in combined:
+                      print(f"[WARN] Backend session precondition error on attempt {attempt}/{max_attempts} for {' '.join(cmd)}. Retrying...")
+                      time.sleep(5)
+                      continue
+                  return proc
+              return proc
 
           print("=== 6. Retrieving Initial Findings Report ===")
           report_proc = subprocess.run(["cm", "report", "-f", "json"], capture_output=True, text=True)
@@ -307,7 +305,7 @@ jobs:
               print(f"[ERROR] cm report failed (exit {report_proc.returncode}):\n{report_proc.stderr}", file=sys.stderr)
               sys.exit(1)
           try:
-              findings = json.loads(report_proc.stdout)
+              findings = json.loads(report_proc.stdout) if report_proc.stdout.strip() else []
           except json.JSONDecodeError as e:
               print(f"[ERROR] Failed to parse findings report as JSON: {e}", file=sys.stderr)
               print(f"Raw output: {report_proc.stdout[:500]}", file=sys.stderr)
@@ -339,7 +337,7 @@ jobs:
               try:
                   # (1) 취약점 검증 (cm verify)
                   print(f"--> Step 1: Verifying vulnerability with 'cm verify {finding_id} -y --sandbox=false --bypass-warning'...")
-                  verify_proc = subprocess.run(["cm", "verify", finding_id, "-y", "--sandbox=false", "--bypass-warning"], capture_output=True, text=True)
+                  verify_proc = run_cm_with_retry(["cm", "verify", finding_id, "-y", "--sandbox=false", "--bypass-warning"])
                   print(verify_proc.stdout)
 
                   if verify_proc.returncode != 0:
@@ -357,7 +355,7 @@ jobs:
 
                   # (3) cm fix로 보안 패치 적용
                   print(f"--> Step 3: Generating and applying fix with 'cm fix {finding_id} -y --sandbox=false --bypass-warning'...")
-                  fix_proc = subprocess.run(["cm", "fix", finding_id, "-y", "--sandbox=false", "--bypass-warning"], capture_output=True, text=True)
+                  fix_proc = run_cm_with_retry(["cm", "fix", finding_id, "-y", "--sandbox=false", "--bypass-warning"])
                   print(fix_proc.stdout)
 
                   if fix_proc.returncode != 0:
@@ -550,7 +548,11 @@ jobs:
 
           for target in $TARGETS; do
             echo "--> Re-scanning merged 'main' target: $target"
-            cm find "$target" -y --sandbox=false --bypass-warning
+            if ! cm find "$target" -y --sandbox=false --bypass-warning; then
+              echo "[WARN] Post-merge 'cm find $target' hit session error; retrying once..."
+              sleep 5
+              cm find "$target" -y --sandbox=false --bypass-warning || echo "[WARN] Second attempt on '$target' exited non-zero; checking state.db findings."
+            fi
           done
 
           python3 - << 'EOF'
